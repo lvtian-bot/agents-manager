@@ -13,26 +13,22 @@ const legacySources = {
     workSource: "8-永久笔记/人工智能/37.1-Work项目指令模板.md",
     codeSource: "8-永久笔记/人工智能/37.2-Code项目指令模板.md",
 };
-const legacyTemplates = {
-    新闻报道: "docs/prompts/文献总结-新闻简讯.md",
-    观点视角: "docs/prompts/文献总结-观点视角.md",
-    知识教程: "docs/prompts/文献总结-知识教程.md",
-};
-
-function defaults(app) {
+function loadSettings(app, data) {
+    const saved = data || {};
     const adapter = app.vault?.adapter;
     const root = adapter?.getBasePath?.() || adapter?.basePath;
     const existing = root && fs.existsSync(path.join(root, app.vault.configDir || ".obsidian", "nascence-sync"));
-    const templates = root && fs.existsSync(path.join(root, legacyTemplates.观点视角));
+    const hasRules = Object.keys(saved.templates || {}).length > 0;
     return {
         endpoint: "https://api.siliconflow.cn/v1/chat/completions",
         model: "deepseek-ai/DeepSeek-V4-Flash", credentialVariable: "SILICONFLOW_API_KEY",
-        languageRule: "中文译成英文，其他语言译成中文。",
-        typeProperty: "content_type", templates: templates ? legacyTemplates : {},
-        defaultTemplate: templates ? legacyTemplates.观点视角 : "",
+        typeProperty: hasRules ? "content_type" : "", templates: {}, defaultTemplate: "",
+        singleTemplate: saved.defaultTemplate || "",
+        summaryMode: hasRules ? "multiple" : "single",
         userSource: "", workSource: "", codeSource: "",
         ...(existing ? legacySources : {}),
         targets: existing ? { ...harnessTargets } : {},
+        ...saved,
     };
 }
 
@@ -221,12 +217,26 @@ class ManagerSettings extends PluginSettingTab {
         field(container, "workSource", "Work 项目模板", "同步前两个一级标题之间的区块。", vaultPath);
         field(container, "codeSource", "Code 项目模板", "各项目的目标在同步面板中登记。", vaultPath);
 
-        container.createEl("h3", { text: "AI 总结或翻译" });
-        field(container, "defaultTemplate", "默认总结模板", "留空使用内置提示词。模板可以用 {activeNote} 引用笔记。", vaultPath);
-        field(container, "languageRule", "翻译方向", "");
-        const types = disclosure(container, "按类型指定总结模板");
-        field(types, "typeProperty", "笔记类型属性", "");
-        mapping(types, "templates", "类型与总结模板", "笔记类型", "总结模板", "添加类型", vaultPath);
+        container.createEl("h3", { text: "AI 总结笔记" });
+        const setting = new Setting(container).setName("总结模式");
+        const mode = setting.controlEl.createEl("select", { attr: { "aria-label": "总结模式" } });
+        mode.createEl("option", { text: "单提示词模式" }).value = "single";
+        mode.createEl("option", { text: "多提示词模式" }).value = "multiple";
+        mode.value = plugin.settings.summaryMode;
+        readers.set("summaryMode", () => mode.value);
+        const single = container.createDiv();
+        const multiple = container.createDiv();
+        field(single, "singleTemplate", "总结提示词", "留空使用内置提示词。模板可以用 {activeNote} 引用笔记。", vaultPath);
+        field(multiple, "typeProperty", "匹配属性", "", required);
+        mapping(multiple, "templates", "提示词匹配规则", "属性值", "提示词笔记", "添加规则", vaultPath);
+        field(multiple, "defaultTemplate", "未匹配时使用的提示词", "留空使用内置提示词。", vaultPath);
+        function showMode() {
+            single.hidden = mode.value !== "single";
+            multiple.hidden = !single.hidden;
+            clearError();
+        }
+        mode.onchange = showMode;
+        showMode();
         const model = disclosure(container, "模型连接");
         field(model, "endpoint", "模型接口", "兼容 Chat Completions 的完整请求地址。", modelEndpoint);
         field(model, "model", "模型名称", "", required);
@@ -239,7 +249,11 @@ class ManagerSettings extends PluginSettingTab {
             button.setDisabled(true);
             try {
                 const updated = { ...plugin.settings };
-                for (const [key, getValue] of readers) updated[key] = getValue();
+                for (const [key, getValue] of readers) {
+                    if (single.hidden && key === "singleTemplate") continue;
+                    if (multiple.hidden && ["typeProperty", "templates", "defaultTemplate"].includes(key)) continue;
+                    updated[key] = getValue();
+                }
                 await plugin.saveData(updated);
                 plugin.settings = updated;
                 new Notice("设置已保存。");
@@ -251,4 +265,4 @@ class ManagerSettings extends PluginSettingTab {
         }));
     }
 }
-module.exports = { defaults, ManagerSettings };
+module.exports = { loadSettings, ManagerSettings };

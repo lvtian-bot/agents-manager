@@ -49,26 +49,29 @@ async function requestText(settings, prompt, signal, onText) {
     }
 }
 
-async function editWithAI(plugin) {
+async function editWithAI(plugin, action) {
     const { app, settings } = plugin;
     const file = app.workspace.getActiveFile();
     if (!file) throw new Error("请先打开笔记。");
     const editor = app.workspace.activeEditor?.editor;
     const originalSelection = editor?.getSelection() || "";
-    const translating = Boolean(originalSelection.trim());
+    const translating = action === "translation";
+    if (translating && !originalSelection.trim()) throw new Error("请先选中要翻译的外文。");
     const from = editor?.getCursor?.("from");
     const to = editor?.getCursor?.("to");
     const original = editor?.getValue?.() ?? await app.vault.read(file);
     let prompt;
     let title;
     if (translating) {
-        title = "AI 翻译";
-        prompt = [settings.languageRule, "忠实保留原意、语气和术语，使用自然流畅的目标语言，只输出译文。", originalSelection.trim()].join("\n\n");
+        title = "AI 翻译为中文";
+        prompt = ["请将下面的外文翻译为中文，已有中文保留原文。忠实保留原意、语气和术语，只输出译文。", originalSelection.trim()].join("\n\n");
     } else {
-        const type = app.metadataCache?.getFileCache(file)?.frontmatter?.[settings.typeProperty];
-        const match = Object.hasOwn(settings.templates, type) && settings.templates[type];
-        const templatePath = match || settings.defaultTemplate;
-        title = "AI 总结" + (match ? " · " + type : "");
+        const multiple = settings.summaryMode === "multiple";
+        const metadata = multiple && app.metadataCache?.getFileCache(file)?.frontmatter;
+        const type = metadata && Object.hasOwn(metadata, settings.typeProperty) ? metadata[settings.typeProperty] : undefined;
+        const match = ["string", "number", "boolean"].includes(typeof type) && Object.hasOwn(settings.templates, type) && settings.templates[type];
+        const templatePath = multiple ? match || settings.defaultTemplate : settings.singleTemplate;
+        title = "AI 总结笔记" + (match ? " · " + type : "");
         let template = "请忠实总结以下笔记的要点，保留关键事实、数字和结论。\n\n{activeNote}";
         if (templatePath) {
             const templateFile = app.vault.getAbstractFileByPath(templatePath);
