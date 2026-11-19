@@ -161,10 +161,11 @@ async function loadPlugin(app, options = {}) {
     };
 }
 
-test("插件仅注册两条命令，快捷键由使用者绑定", async () => {
+test("总结与翻译分别注册，快捷键由使用者绑定", async () => {
     const { commands } = await loadPlugin({});
     assert.deepEqual(commands.map(({ id }) => id), [
-        "summarize-or-translate",
+        "summarize-note",
+        "translate-selection",
         "sync-instructions",
     ]);
     assert.ok(commands.every((command) => !Object.hasOwn(command, "hotkeys")));
@@ -183,6 +184,8 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
         } };
         const { plugin: fresh } = await loadPlugin(app, options);
         assert.deepEqual(Object.keys(fresh.settings.targets), []);
+        assert.equal(fresh.settings.summaryMode, "single");
+        assert.equal(fresh.settings.typeProperty, "");
         fs.mkdirSync(path.join(fixtureDir, ".obsidian", "nascence-sync"), { recursive: true });
         const { plugin } = await loadPlugin(app, { ...options, settings: { templates: { 文章: "旧模板.md" }, extra: 7 } });
         const tab = plugin.settingTab;
@@ -195,10 +198,11 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
         assert.equal(nodes(element => element.textContent === "×").length, 6);
         assert.equal(fields("目标文件").length, 0);
         assert.equal(button("添加目标").disabled, true);
-        assert.equal(fields("总结模板")[0].value, "旧模板.md");
+        assert.equal(fields("提示词笔记")[0].value, "旧模板.md");
+        assert.equal(fields("总结模式")[0].value, "multiple");
         assert.ok(nodes(element => element.tag === "details").every(element => !element.open));
-        fields("选择默认总结模板")[0].onclick();
-        assert.equal(fields("默认总结模板")[0].value, "模板/摘要.md");
+        fields("选择未匹配时使用的提示词")[0].onclick();
+        assert.equal(fields("未匹配时使用的提示词")[0].value, "模板/摘要.md");
         fields("移除 Claude")[0].onclick();
         button("添加目标").onclick();
         assert.deepEqual(Array.from(choices, item => item.title), ["Claude"]);
@@ -219,27 +223,59 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
         assert.equal(saved[0].extra, 7);
         assert.deepEqual(notices, ["设置已保存。"]);
         tab.display();
-        assert.equal(fields("默认总结模板")[0].value, "模板/摘要.md");
+        assert.equal(fields("未匹配时使用的提示词")[0].value, "模板/摘要.md");
         assert.equal(fields("移除 Codex").length, 0);
         plugin.settings.targets = { Codex: "~/legacy.md", 自定义: "~/custom.md" };
         tab.display();
         await save();
         assert.deepEqual({ ...saved.at(-1).targets }, { Codex: "~/legacy.md", 自定义: "~/custom.md" });
+        const choose = value => {
+            const mode = fields("总结模式")[0];
+            mode.value = value;
+            mode.onchange();
+        };
+        choose("single");
+        fields("总结提示词")[0].value = "单独.md";
+        await save();
+        tab.display();
+        assert.equal(fields("总结模式")[0].value, "single");
+        choose("multiple");
+        fields("匹配属性")[0].value = "文章类型";
+        button("添加规则").onclick();
+        fields("属性值").at(-1).value = "访谈";
+        fields("提示词笔记").at(-1).value = "访谈摘要.md";
+        await save();
+        assert.equal(plugin.settings.typeProperty, "文章类型");
+        assert.equal(plugin.settings.templates.访谈, "访谈摘要.md");
+        assert.equal(plugin.settings.defaultTemplate, "模板/摘要.md");
+        assert.equal(plugin.settings.singleTemplate, "单独.md");
     } finally {
         fs.rmSync(fixtureDir, { recursive: true, force: true });
     }
 });
 
+test("没有选区时翻译只提示，不发起模型请求", async () => {
+    const notices = [];
+    const plugin = await loadPlugin({
+        workspace: { getActiveFile: () => ({ path: "笔记.md" }), activeEditor: { editor: { getSelection: () => " " } } },
+    }, { notices });
+    await plugin.invoke("translate-selection");
+    assert.deepEqual(notices, ["请先选中要翻译的外文。"]);
+    assert.equal(plugin.body.children.length, 0);
+});
+
 test("AI 命令保持选区翻译、按类型总结及流式内容写回", async () => {
     const cases = [
-        ["观点视角", "需要翻译的选区", null],
+        ["观点视角", "Selected passage", null],
         ["新闻报道", "", "新闻简讯"],
         ["观点视角", "", "观点视角"],
         ["知识教程", "", "知识教程"],
         [null, "", "观点视角"],
+        ["新闻报道", "样例", "新闻简讯"],
+        ["新闻报道", "样例", "单独", "single"],
     ];
 
-    for (const [type, selection, template] of cases) {
+    for (const [type, selection, template, mode] of cases) {
         const file = { path: "样例.md" };
         const frontmatter = type ? `---\ncontent_type: "${type}"\n---\n` : "";
         const note = frontmatter + "样例文献正文";
@@ -247,7 +283,10 @@ test("AI 命令保持选区翻译、按类型总结及流式内容写回", async
         const openedTemplates = [];
 
         const app = {
-            metadataCache: { getFileCache: () => ({ frontmatter: {content_type: type} }) },
+            metadataCache: { getFileCache: () => {
+                assert.ok(mode !== "single" && template, "单提示词模式和翻译不读取元数据");
+                return { frontmatter: {文章类型: type} };
+            } },
             workspace: {
                 getActiveFile: () => file,
                 activeEditor: {
@@ -270,6 +309,8 @@ test("AI 命令保持选区翻译、按类型总结及流式内容写回", async
 
         const plugin = await loadPlugin(app, {
             settings: {
+                typeProperty: "文章类型",
+                ...(mode ? { summaryMode: mode, singleTemplate: "docs/prompts/文献总结-单独.md" } : {}),
                 templates: { 新闻报道: "docs/prompts/文献总结-新闻简讯.md", 观点视角: "docs/prompts/文献总结-观点视角.md", 知识教程: "docs/prompts/文献总结-知识教程.md" },
                 defaultTemplate: "docs/prompts/文献总结-观点视角.md",
             },
@@ -277,8 +318,9 @@ test("AI 命令保持选区翻译、按类型总结及流式内容写回", async
                 assert.equal(url, "https://api.siliconflow.cn/v1/chat/completions");
                 const body = JSON.parse(request.body);
                 assert.equal(body.stream, true);
-                if (selection) {
-                    assert.match(body.messages[0].content, /需要翻译的选区/);
+                if (!template) {
+                    assert.match(body.messages[0].content, /Selected passage/);
+                    assert.match(body.messages[0].content, /外文翻译为中文/);
                     assert.doesNotMatch(body.messages[0].content, /样例文献正文/);
                 } else {
                     assert.equal(body.messages[0].content, "请总结：" + note);
@@ -305,7 +347,7 @@ test("AI 命令保持选区翻译、按类型总结及流式内容写回", async
             },
         });
 
-        await plugin.invoke("summarize-or-translate");
+        await plugin.invoke(template ? "summarize-note" : "translate-selection");
         assert.deepEqual(openedTemplates, template ? [`docs/prompts/文献总结-${template}.md`] : []);
         const [preview] = findElements(plugin.body, (element) => element.tag === "textarea");
         assert.equal(preview.value, "生成结果");

@@ -1,15 +1,19 @@
 const { Notice, Plugin, Modal } = require("obsidian");
-const { defaults, ManagerSettings } = require("./settings");
+const { loadSettings, ManagerSettings } = require("./settings");
 const { editWithAI } = require("./notes");
 
 module.exports = class AgentsManager extends Plugin {
     async onload() {
-        this.settings = { ...defaults(this.app), ...await this.loadData() };
+        this.settings = loadSettings(this.app, await this.loadData());
         this.modals = new Set();
         this.addSettingTab(new ManagerSettings(this));
         this.addCommand({
-            id: "summarize-or-translate", name: "AI 总结或翻译",
-            callback: () => this.run(() => editWithAI(this)),
+            id: "summarize-note", name: "AI 总结笔记",
+            callback: () => this.run(() => editWithAI(this, "summary")),
+        });
+        this.addCommand({
+            id: "translate-selection", name: "AI 翻译为中文",
+            callback: () => this.run(() => editWithAI(this, "translation")),
         });
         this.addCommand({
             id: "sync-instructions", name: "分发与回收指令",
