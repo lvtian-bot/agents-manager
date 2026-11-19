@@ -31,6 +31,7 @@ class Element {
     getAttribute(key) { return this.attributes?.[key]; }
     removeAttribute(key) { delete this.attributes?.[key]; }
     focus() { this.focused = true; }
+    getBoundingClientRect() { return { left: 0, bottom: 0 }; }
     closest(tag) { return this.tag === tag ? this : this.parent?.closest(tag); }
     empty() { this.children = []; }
     createEl(tag, { text, attr } = {}) {
@@ -95,6 +96,7 @@ async function loadPlugin(app, options = {}) {
         addButton(build) {
             const element = this.controlEl.createEl("button");
             build({
+                buttonEl: element,
                 setButtonText(label) { element.textContent = label; return this; },
                 setCta() { return this; },
                 setDisabled(disabled) { element.disabled = disabled; },
@@ -109,7 +111,19 @@ async function loadPlugin(app, options = {}) {
         document,
         require(name) {
             if (name === "obsidian") {
-                return { Notice, Plugin, Modal, Setting, PluginSettingTab: class {}, FuzzySuggestModal: class {
+                class Menu {
+                    items = [];
+                    addItem(build) {
+                        const item = {
+                            setTitle(title) { this.title = title; return this; },
+                            onClick(action) { this.action = action; return this; },
+                        };
+                        build(item);
+                        this.items.push(item);
+                    }
+                    showAtPosition() { options.menu(this.items); }
+                }
+                return { Notice, Plugin, Modal, Setting, Menu, PluginSettingTab: class {}, FuzzySuggestModal: class {
                     constructor(app) { this.app = app; }
                     open() { options.pick(this); }
                     onClose() {}
@@ -162,7 +176,8 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
     const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-settings-"));
     try {
         const app = { vault: { adapter: { getBasePath: () => fixtureDir }, getMarkdownFiles: () => [{ path: "模板/摘要.md" }] } };
-        const options = { notices, save: value => saved.push(value), pick: picker => {
+        let choices;
+        const options = { notices, menu: items => { choices = items; }, save: value => saved.push(value), pick: picker => {
             picker.onChooseItem(picker.getItems()[0]);
             picker.onClose();
         } };
@@ -177,38 +192,39 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
         const button = text => nodes(element => element.tag === "button" && element.textContent === text)[0];
         const save = () => button("保存设置").onclick();
         tab.display();
-        assert.equal(fields("工具名称").length, 6);
+        assert.equal(nodes(element => element.textContent === "×").length, 6);
+        assert.equal(fields("目标文件").length, 0);
+        assert.equal(button("添加目标").disabled, true);
         assert.equal(fields("总结模板")[0].value, "旧模板.md");
         assert.ok(nodes(element => element.tag === "details").every(element => !element.open));
         fields("选择默认总结模板")[0].onclick();
         assert.equal(fields("默认总结模板")[0].value, "模板/摘要.md");
+        fields("移除 Claude")[0].onclick();
         button("添加目标").onclick();
-        const name = fields("工具名称").at(-1);
-        const target = fields("目标文件").at(-1);
-        name.value = "Codex";
-        target.value = "relative.md";
-        await save();
-        assert.equal(name.getAttribute("aria-invalid"), "true");
-        name.value = "新工具";
-        await save();
-        assert.equal(target.getAttribute("aria-invalid"), "true");
-        target.value = "~/新工具.md";
+        assert.deepEqual(Array.from(choices, item => item.title), ["Claude"]);
+        choices[0].action();
+        assert.equal(button("添加目标").disabled, true);
+        fields("移除 Codex")[0].onclick();
+        assert.ok(plugin.settings.targets.Codex);
         fields("模型接口")[0].value = "无效地址";
         await save();
         assert.ok(fields("模型接口")[0].closest("details").open);
         assert.equal(saved.length, 0);
         assert.equal(plugin.settings.defaultTemplate, "");
         fields("模型接口")[0].value = "https://example.org/v1/chat/completions";
-        button("移除").onclick();
         await save();
         assert.equal(saved.length, 1);
         assert.equal(saved[0].targets.Codex, undefined);
-        assert.equal(saved[0].targets.新工具, "~/新工具.md");
+        assert.equal(saved[0].targets.Claude, "~/.claude/CLAUDE.md");
         assert.equal(saved[0].extra, 7);
         assert.deepEqual(notices, ["设置已保存。"]);
         tab.display();
         assert.equal(fields("默认总结模板")[0].value, "模板/摘要.md");
-        assert.ok(fields("工具名称").some(element => element.value === "新工具"));
+        assert.equal(fields("移除 Codex").length, 0);
+        plugin.settings.targets = { Codex: "~/legacy.md", 自定义: "~/custom.md" };
+        tab.display();
+        await save();
+        assert.deepEqual({ ...saved.at(-1).targets }, { Codex: "~/legacy.md", 自定义: "~/custom.md" });
     } finally {
         fs.rmSync(fixtureDir, { recursive: true, force: true });
     }
