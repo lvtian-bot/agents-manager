@@ -1,0 +1,1530 @@
+var fs = require("fs");
+var path = require("path");
+var os = require("os");
+var crypto = require("crypto");
+const { normalizeNewlines, extractInstructionBody, parseWorkStructure, rebuildDocument, computeLineDiff, composeMergedBody } = require("./documents");
+
+async function openInstructions(plugin) {
+    const { app, settings } = plugin;
+    const LAYER1_SOURCE = settings.userSource;
+    const LAYER1_TARGETS = Object.entries(settings.targets).map(([name, file]) => ({
+        name, path: file.startsWith("~/") ? path.join(os.homedir(), file.slice(2)) : file,
+    }));
+    const TYPE_SOURCES = {
+        work: { name: "Work 类型模板", vaultPath: settings.workSource },
+        code: { name: "Code 类型模板", vaultPath: settings.codeSource },
+    };
+    // 通道实例：定义见下方 makeUserChannel／makeTypeChannel。
+    var USER_CHANNEL = makeUserChannel();
+    var TYPE_CHANNELS = {
+        work: makeTypeChannel("work"),
+        code: makeTypeChannel("code")
+    };
+
+    var VAULT_ROOT = null;
+    var STATE_ROOT = null;
+    var REGISTRY_PATH = null;
+    var LAYER1_STATE_PATH = null;
+    var LAYER2_STATE_PATH = null;
+
+    async function displayPanel() {
+
+        try {
+            configureStatePaths(app);
+        } catch (error) {
+            console.error("[sync-instructions]", error);
+            await showMessage("指令分发失败", error && error.message ? error.message : String(error));
+            return;
+        }
+
+        // 两级独立准备：一级出错不阻塞另一级。
+        var layer1 = { error: null, plan: null };
+        var layer2 = { error: null, plan: null };
+
+        try {
+            var userSource = USER_CHANNEL.extractSource(await readVaultFile(app, LAYER1_SOURCE));
+            layer1.plan = buildChannelPlan(USER_CHANNEL, LAYER1_TARGETS, userSource, null, readChannelState(USER_CHANNEL));
+        } catch (error) {
+            console.error("[sync-instructions] layer1", error);
+            layer1.error = error && error.message ? error.message : String(error);
+        }
+
+        try {
+            var registry = readRegistry();
+            var loaded = await loadTypeSources(app, registry);
+            layer2.plan = buildTypePlans(registry.projects, loaded.sources, loaded.errors);
+        } catch (error) {
+            console.error("[sync-instructions] layer2", error);
+            layer2.error = error && error.message ? error.message : String(error);
+        }
+
+        if (layer1.error && layer2.error) {
+            await showMessage(
+                "指令分发失败",
+                "第一级：" + layer1.error + "\n\n第二级：" + layer2.error
+            );
+            return;
+        }
+
+        await showPanel(app, layer1, layer2);
+    };
+    function configureStatePaths(app) {
+        var adapter = app && app.vault && app.vault.adapter;
+        var vaultRoot = null;
+        if (adapter && typeof adapter.getBasePath === "function") {
+            vaultRoot = adapter.getBasePath();
+        } else if (adapter && typeof adapter.basePath === "string") {
+            vaultRoot = adapter.basePath;
+        }
+        if (!vaultRoot) {
+            throw new Error("无法定位当前 Obsidian 仓库根目录，已停止读取或写入同步记录。");
+        }
+
+        VAULT_ROOT = vaultRoot;
+        const configDir = path.join(vaultRoot, app.vault.configDir || ".obsidian");
+        const legacy = path.join(configDir, "nascence-sync");
+        STATE_ROOT = fs.existsSync(legacy) ? legacy : path.join(configDir, "agents-manager-sync");
+        REGISTRY_PATH = path.join(STATE_ROOT, "instruction-projects.json");
+        LAYER1_STATE_PATH = path.join(STATE_ROOT, "user-instructions-sync.json");
+        LAYER2_STATE_PATH = path.join(STATE_ROOT, "type-instructions-sync.json");
+
+        USER_CHANNEL.statePath = LAYER1_STATE_PATH;
+        TYPE_CHANNELS.work.statePath = LAYER2_STATE_PATH;
+        TYPE_CHANNELS.code.statePath = LAYER2_STATE_PATH;
+    }
+
+    // ===== 通用读写 =====
+
+    async function readVaultFile(app, vaultPath) {
+        // 与 syncReadVault 完全同源：面板判定与合并弹窗必须读到同一份内容，
+        // 否则会出现"卡片判定不一致、对比却无差异"的矛盾。
+        return syncReadVault(app, vaultPath);
+    }
+
+    function writeVaultFile(app, vaultPath, newContent) {
+        var activeFile = app.workspace.getActiveFile();
+        if (activeFile && activeFile.path === vaultPath) {
+            var activeEditor = app.workspace.activeEditor && app.workspace.activeEditor.editor;
+            if (activeEditor && typeof activeEditor.setValue === "function") {
+                activeEditor.setValue(newContent);
+                return app.workspace.activeEditor?.save?.();
+            }
+        }
+
+        var leaf = app.workspace.getLeavesOfType("markdown").find(function (l) {
+            return l.view && l.view.file && l.view.file.path === vaultPath;
+        });
+        if (leaf && leaf.view && leaf.view.editor && typeof leaf.view.editor.setValue === "function") {
+            leaf.view.editor.setValue(newContent);
+            return leaf.view.save?.();
+        }
+
+        var file = app.vault.getAbstractFileByPath(vaultPath);
+        if (!file) {
+            throw new Error("找不到文件：" + vaultPath);
+        }
+        return app.vault.modify(file, newContent);
+    }
+
+    // 同步读取 vault 文件：优先编辑器未落盘内容，否则直接读磁盘（此时文件未在编辑器中
+    // 打开，磁盘内容即 vault 已保存内容）。
+    function syncReadVault(app, vaultPath) {
+        var activeFile = app.workspace.getActiveFile();
+        if (activeFile && activeFile.path === vaultPath) {
+            var activeEditor = app.workspace.activeEditor && app.workspace.activeEditor.editor;
+            if (activeEditor && typeof activeEditor.getValue === "function") {
+                return activeEditor.getValue();
+            }
+        }
+        var leaf = app.workspace.getLeavesOfType("markdown").find(function (l) {
+            return l.view && l.view.file && l.view.file.path === vaultPath;
+        });
+        if (leaf && leaf.view && leaf.view.editor && typeof leaf.view.editor.getValue === "function") {
+            return leaf.view.editor.getValue();
+        }
+        if (!vaultPath) throw new Error("请在插件设置中选择源笔记。");
+        var diskPath = path.join(VAULT_ROOT, vaultPath);
+        if (!fs.existsSync(diskPath)) {
+            throw new Error("找不到文件：" + vaultPath);
+        }
+        return fs.readFileSync(diskPath, "utf8");
+    }
+
+    function canonicalPath(filePath) {
+        var absolute = path.resolve(filePath);
+        return process.platform === "win32" ? absolute.toLowerCase() : absolute;
+    }
+
+    function readExternalText(filePath) {
+        return normalizeNewlines(fs.readFileSync(filePath, "utf8"));
+    }
+
+    function hashText(text) {
+        return crypto.createHash("sha256").update(text, "utf8").digest("hex");
+    }
+
+    function withoutTrailingNewline(text) {
+        return String(text).replace(/\n$/, "");
+    }
+
+    function backupAndWrite(targetPath, content, backupDirectoryName) {
+        var backupDirectory = path.join(os.tmpdir(), backupDirectoryName);
+        fs.mkdirSync(backupDirectory, { recursive: true });
+
+        var stamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 17);
+        var backupPath = null;
+        if (fs.existsSync(targetPath)) {
+            var backupName = (path.basename(path.dirname(targetPath)) + "-" + path.basename(targetPath))
+                .replace(/[\\/:*?"<>|]/g, "_") + "." + stamp + ".bak";
+            backupPath = path.join(backupDirectory, backupName);
+            fs.copyFileSync(targetPath, backupPath);
+        }
+        fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+        fs.writeFileSync(targetPath, content, "utf8");
+
+        var verified = readExternalText(targetPath);
+        if (verified !== content) {
+            throw new Error("写入后校验失败：" + targetPath);
+        }
+        return backupPath;
+    }
+
+    // 备份源笔记当前内容（可能含编辑器未落盘修改）到临时目录，供一键回收等
+    // 覆盖源侧的写回动作在丢弃另一侧改动时留退路。
+    function backupVaultText(text, vaultPath, backupDirectoryName) {
+        var backupDirectory = path.join(os.tmpdir(), backupDirectoryName);
+        fs.mkdirSync(backupDirectory, { recursive: true });
+
+        var stamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 17);
+        var backupName = (path.basename(path.dirname(vaultPath)) + "-" + path.basename(vaultPath))
+            .replace(/[\\/:*?"<>|]/g, "_") + "." + stamp + ".bak";
+        var backupPath = path.join(backupDirectory, backupName);
+        fs.writeFileSync(backupPath, text, "utf8");
+        return backupPath;
+    }
+
+    // ===== 同步通道：两级状态机的差异点 =====
+
+    // 用户级通道：源为 用户指令源笔记，整份正文（去 frontmatter）参与同步。
+    function makeUserChannel() {
+        var channel = {
+            id: "user",
+            layerLabel: "第一级",
+            sourceVaultPath: LAYER1_SOURCE,
+            sourceName: "用户指令源笔记",
+            entriesKey: "targets",
+            entryHasName: false,
+            stateSourcePath: LAYER1_SOURCE,
+            hashFieldSource: "sourceHash",
+            hashFieldTarget: "targetHash",
+            backupDirectory: "nascence-user-instructions-sync",
+            statePath: null
+        };
+
+        channel.newState = function () {
+            return { version: 1, sourcePath: LAYER1_SOURCE, targets: [] };
+        };
+
+        // 源提取：保留可选的 frontmatter 于源笔记，正文去尾部多余换行后保留单个结尾换行。
+        channel.extractSource = function (text) {
+            var body = extractInstructionBody(text);
+            return { section: body, sectionHash: hashText(body), fullBody: body };
+        };
+
+        // 读源侧文档：raw 供备份，section 参与对比，composeSourceText 生成写回全文。
+        channel.readSourceDocument = function (app) {
+            var text = normalizeNewlines(syncReadVault(app, channel.sourceVaultPath));
+            var match = text.match(/^---\n[\s\S]*?\n---\n?/);
+
+            return {
+                raw: text,
+                section: extractInstructionBody(text),
+                composeSourceText: function (newSection) {
+                    return (match ? match[0] + "\n" : "") + newSection.replace(/\n+$/, "") + "\n";
+                }
+            };
+        };
+
+        channel.readSourceSection = function (app) {
+            return extractInstructionBody(syncReadVault(app, channel.sourceVaultPath));
+        };
+
+        channel.readSourceSectionFromDisk = function () {
+            return extractInstructionBody(
+                normalizeNewlines(fs.readFileSync(path.join(VAULT_ROOT, channel.sourceVaultPath), "utf8"))
+            );
+        };
+
+        channel.readTargetDocument = function (targetPath) {
+            return {
+                section: readExternalText(targetPath),
+                composeTargetText: function (newSection) { return newSection; }
+            };
+        };
+
+        channel.readTargetSection = function (targetPath) {
+            return readExternalText(targetPath);
+        };
+
+        // 回收建立基线时 entry 存规范化尾换行后的正文。
+        channel.recycleEntryText = function (section) {
+            return section.replace(/\n+$/, "") + "\n";
+        };
+
+        // 合并结果写回源侧前规范为单个结尾换行。
+        channel.normalizeMerged = function (merged) {
+            return merged.replace(/\n+$/, "") + "\n";
+        };
+
+        var LABEL_BACKUP_AND_OVERWRITE = "备份并覆盖";
+
+        channel.text = {
+            deletedAfterSync: "目标文件在上次同步后被删除；确认后可用源正文重新创建。",
+            initialCreate: "目标文件不存在，确认后可以创建。",
+            recordOnly: "目标内容已一致，只需建立同步基线",
+            unchanged: "目标内容已与 用户指令源笔记一致，已完成同步。",
+            initialReview: "目标文件与 用户指令源笔记不一致；可" + LABEL_BACKUP_AND_OVERWRITE + "、将目标版本回收进 用户指令源笔记，或行级对比合并。",
+            conflictBoth: "目标文件和 用户指令源笔记在上次同步后都被修改过；一键动作保留所选一侧、丢弃另一侧（被覆盖一侧先备份到临时目录），要两边都保留请行级对比合并。",
+            conflictTargetOnly: "目标文件在上次同步后被外部修改，用户指令源笔记未变；可将目标版本一键回收进 用户指令源笔记，或" + LABEL_BACKUP_AND_OVERWRITE + "。",
+            sync: "只有 用户指令源笔记发生变化，目标文件未被外部修改。",
+            unchangedNoChange: "源和目标都没有变化。",
+            // 用户级目标为整份文件，不存在标题结构异常，以下两条不会触发。
+            invalidStructure: "",
+            invalidStructureHint: "",
+            baselineNoFile: "目标内容已变化，无法只建立同步基线：",
+            baselineChanged: "目标内容已变化，无法只建立同步基线：",
+            changedDuringDialog: "点击后目标文件又发生了变化，已停止覆盖：",
+            baselineSaved: "已建立同步基线，未改写文件。",
+            createdFromSource: "目标文件不存在，已创建并建立同步基线。",
+            distributed: "已备份并覆盖此文件。\n备份：",
+            distributedNoBackup: "目标文件不存在，已创建并建立同步基线。",
+            recycleIdentical: "用户指令源笔记已与目标文件一致，已建立同步基线，未改写任何文件。",
+            recycleBackup: "已备份 用户指令源笔记原文：",
+            recycleDone: "已把目标文件正文回收进 用户指令源笔记，同步基线已更新。",
+            recycleDrift: "\n注意：用户指令源笔记在上次同步后也有改动，本次回收未保留笔记侧改动，需要时可从备份恢复。",
+            recycleTail: "",
+            mergeSourceWritten: "已写回 用户指令源笔记",
+            mergeSourceUntouched: "用户指令源笔记已是合并结果，未改写。",
+            mergeTargetWritten: function (target) { return "已写回 " + target.name; },
+            mergeTargetUntouchedTail: " 已是合并结果，未改写。",
+            mergeDone: "两边已一致，该目标同步基线已更新。",
+            mergeUnsavedSource: "两侧内容一致，但 用户指令源笔记在编辑器中还有未保存的修改。\n请先保存源笔记，再重新运行命令刷新判定。",
+            mergeIdentical: "两侧内容完全一致，已为该目标建立同步基线。\n重新运行命令后将显示已同步。",
+            mergeTitle: function (target) { return "行级合并：" + target.name + " ← 用户指令源笔记"; },
+            mergeHelp: "勾=保留该行，不勾=移除。红行=仅 用户指令源笔记有（默认不保留），绿行=仅目标文件有（默认保留）。" +
+                "默认合并结果即目标文件当前正文；勾选红行可把笔记侧多出的内容并入。" +
+                "写回时 用户指令源笔记正文与目标文件同时替换为合并结果，两边保持一致；写回保留源笔记 frontmatter。",
+            mergeSourceLabel: "用户指令源笔记",
+            mergeApplyLabel: "写回 用户指令源笔记与目标文件"
+        };
+
+        channel.labels = {
+            initialCreateButton: "创建并建立基线",
+            reviewDistribute: LABEL_BACKUP_AND_OVERWRITE,
+            recycle: "用目标版本回收进 用户指令源笔记",
+            overwriteExisting: LABEL_BACKUP_AND_OVERWRITE,
+            overwriteMissing: "用源正文重新创建"
+        };
+
+        return channel;
+    }
+
+    // 类型通道（work／code）：源为类型模板，只同步第 1 个一级标题区块。
+    function makeTypeChannel(typeKey) {
+        var definition = TYPE_SOURCES[typeKey];
+        var channel = {
+            id: typeKey,
+            layerLabel: "第二级",
+            sourceVaultPath: definition.vaultPath,
+            sourceName: definition.name,
+            entriesKey: "projects",
+            entryHasName: true,
+            stateSourcePath: null,
+            hashFieldSource: "sourceSectionHash",
+            hashFieldTarget: "targetSectionHash",
+            backupDirectory: "nascence-type-instructions-sync",
+            statePath: null
+        };
+
+        channel.newState = function () {
+            return { version: 1, projects: [] };
+        };
+
+        // 源提取：第 1 个「# 」一级标题到第 2 个之间的区块参与同步；
+        // fullBody 含第三级示例，仅首次接入生成完整项目文件时使用。
+        channel.extractSource = function (text) {
+            var structure = parseWorkStructure(text);
+            return {
+                section: structure.workSection,
+                sectionHash: hashText(structure.workSection),
+                fullBody: (structure.before + structure.workSection + "\n" + structure.after).replace(/\n+$/, "\n")
+            };
+        };
+
+        channel.readSourceDocument = function (app) {
+            var text = normalizeNewlines(syncReadVault(app, channel.sourceVaultPath));
+            var structure = parseWorkStructure(text);
+            return {
+                raw: text,
+                section: structure.workSection,
+                composeSourceText: function (newSection) {
+                    return rebuildDocument(structure, newSection);
+                }
+            };
+        };
+
+        channel.readSourceSection = function (app) {
+            return parseWorkStructure(syncReadVault(app, channel.sourceVaultPath)).workSection;
+        };
+
+        channel.readSourceSectionFromDisk = function () {
+            return parseWorkStructure(
+                normalizeNewlines(fs.readFileSync(path.join(VAULT_ROOT, channel.sourceVaultPath), "utf8"))
+            ).workSection;
+        };
+
+        channel.readTargetDocument = function (targetPath) {
+            var structure = parseWorkStructure(readExternalText(targetPath));
+            return {
+                section: structure.workSection,
+                composeTargetText: function (newSection) {
+                    return rebuildDocument(structure, newSection);
+                }
+            };
+        };
+
+        channel.readTargetSection = function (targetPath) {
+            return parseWorkStructure(readExternalText(targetPath)).workSection;
+        };
+
+        channel.recycleEntryText = function (section) {
+            return section;
+        };
+
+        channel.normalizeMerged = function (merged) {
+            return merged;
+        };
+
+        channel.text = {
+            deletedAfterSync: "项目文件在上次同步后被删除；确认后可用模板重新生成完整文件。",
+            initialCreate: "项目文件不存在，确认后从 " + definition.name + " 生成完整文件（含第三级示例，需自行按项目事实填写）。",
+            recordOnly: "工作规范区块已与模板一致，只需建立同步基线。",
+            unchanged: "工作规范区块已与模板一致，已完成同步。",
+            initialReview: "首次接入且工作规范与模板存在差异；可将项目版本回收进模板、用模板覆盖项目区块，或行级对比合并。",
+            conflictBoth: "模板和项目工作规范在上次同步后都被修改过；一键动作保留所选一侧、丢弃另一侧（被覆盖一侧先备份到临时目录），要两边都保留请行级对比合并。",
+            conflictTargetOnly: "项目工作规范在上次同步后被修改，模板与上次分发时一致；可将项目版本一键回收进模板，或用模板覆盖项目区块。",
+            sync: "模板已更新，项目工作规范仍是上次分发版本；将备份项目文件后只替换工作规范区块。",
+            unchangedNoChange: "源和目标都没有变化。",
+            invalidStructure: "标题结构异常，已停止处理：",
+            invalidStructureHint: "\n请先人工整理为「第 1 个一级标题＝类型区块、第 2 个一级标题＝项目内容」的结构，正文顶部不要加 H1 文档标题，再运行同步。",
+            baselineNoFile: "项目文件已不存在，无法建立基线：",
+            baselineChanged: "项目工作规范已变化，无法只建立基线：",
+            changedDuringDialog: "点击后项目工作规范又发生了变化，已停止覆盖：",
+            baselineSaved: "已建立同步基线，未改写项目文件。",
+            createdFromSource: "已从 " + definition.name + " 生成完整项目文件，并建立同步基线。",
+            distributed: "已备份并只替换工作规范区块，第三级内容原样保留。\n备份：",
+            distributedNoBackup: "已替换工作规范区块，第三级内容原样保留。",
+            recycleIdentical: "模板已与项目工作规范一致，已建立同步基线，未改写任何文件。",
+            recycleBackup: "已备份模板原文：",
+            recycleDone: "已把项目工作规范回收进 " + definition.name + "，该项目同步基线已更新。",
+            recycleDrift: "\n注意：模板在上次同步后也有改动，本次回收未保留模板侧改动，需要时可从备份恢复。",
+            recycleTail: "\n模板的改进会在下次运行时分发给其他同类型项目。",
+            mergeSourceWritten: "已写回 " + definition.name,
+            mergeSourceUntouched: definition.name + " 已是合并结果，未改写。",
+            mergeTargetWritten: function (target) { return "已写回 " + target.name + " 的工作规范区块，第三级内容原样保留"; },
+            mergeTargetUntouchedTail: " 已是合并结果，未改写。",
+            mergeDone: "两边已一致，该项目同步基线已更新；模板的改进会在下次运行时分发给其他同类型项目。",
+            mergeUnsavedSource: "两侧内容一致，但模板在编辑器中还有未保存的修改。\n请先保存模板，再重新运行命令刷新判定。",
+            mergeIdentical: "两侧内容完全一致，已为该项目建立同步基线。\n重新运行命令后将显示已同步。",
+            mergeTitle: function (target) { return "行级合并：" + target.name + " 工作规范 ← " + definition.name; },
+            mergeHelp: "勾=保留该行，不勾=移除。红行=仅模板有（默认不保留），绿行=仅项目有（默认保留）。" +
+                "默认合并结果即项目当前版本；勾选红行可把模板侧多出的内容并入。" +
+                "写回时模板与项目的工作规范区块同时替换为合并结果，两边保持一致；" +
+                "模板 frontmatter、第 2 个一级标题之后的内容和项目第三级保持不变。",
+            mergeSourceLabel: "模板",
+            mergeApplyLabel: "写回模板与项目"
+        };
+
+        channel.labels = {
+            initialCreateButton: "从模板生成完整文件",
+            reviewDistribute: "用模板区块覆盖",
+            recycle: "用项目版本回收进模板",
+            overwriteExisting: "用模板覆盖此项目",
+            overwriteMissing: "用模板重新生成完整文件"
+        };
+
+        return channel;
+    }
+
+    // ===== 通道状态 =====
+
+    function readChannelState(channel) {
+        if (!fs.existsSync(channel.statePath)) {
+            return null;
+        }
+        try {
+            var parsed = JSON.parse(fs.readFileSync(channel.statePath, "utf8"));
+            if (!parsed || !Array.isArray(parsed[channel.entriesKey])) {
+                throw new Error("结构不正确");
+            }
+            return parsed;
+        } catch (error) {
+            throw new Error(
+                channel.layerLabel + "同步状态文件无法读取，已停止以避免误覆盖：\n" +
+                    channel.statePath + "\n\n" + (error.message || String(error))
+            );
+        }
+    }
+
+    function findSyncEntry(channel, state, targetPath) {
+        if (!state || !Array.isArray(state[channel.entriesKey])) {
+            return null;
+        }
+        var key = canonicalPath(targetPath);
+        return state[channel.entriesKey].find(function (entry) {
+            return canonicalPath(entry.path) === key;
+        }) || null;
+    }
+
+    function saveSyncEntry(channel, target, sourceText, targetText) {
+        var state = readChannelState(channel) || channel.newState();
+        var key = canonicalPath(target.path);
+        var now = new Date().toISOString();
+        var entry = { path: key };
+        if (channel.entryHasName) {
+            entry.type = target.type;
+            entry.name = target.name;
+        }
+        entry[channel.hashFieldSource] = hashText(sourceText);
+        entry[channel.hashFieldTarget] = hashText(targetText);
+        entry.syncedAt = now;
+        var entries = state[channel.entriesKey];
+        var index = entries.findIndex(function (item) {
+            return canonicalPath(item.path) === key;
+        });
+        if (index >= 0) entries[index] = entry;
+        else entries.push(entry);
+        state.version = 1;
+        if (channel.stateSourcePath) state.sourcePath = channel.stateSourcePath;
+        state.updatedAt = now;
+        fs.mkdirSync(STATE_ROOT, { recursive: true });
+        writeState(channel.statePath, state);
+    }
+
+    // ===== 登记表与通道源加载 =====
+
+    function writeState(file, data) {
+        fs.mkdirSync(STATE_ROOT, { recursive: true });
+        const next = file + "." + crypto.randomUUID() + ".tmp";
+        try {
+            fs.writeFileSync(next, JSON.stringify(data, null, 2) + "\n", { encoding: "utf8", flag: "wx" });
+            fs.renameSync(next, file);
+        } finally {
+            if (fs.existsSync(next)) fs.unlinkSync(next);
+        }
+    }
+
+    function readRegistry() {
+        if (!fs.existsSync(REGISTRY_PATH)) {
+            return { version: 1, projects: [] };
+        }
+
+        var parsed;
+        try {
+            parsed = JSON.parse(fs.readFileSync(REGISTRY_PATH, "utf8"));
+        } catch (error) {
+            throw new Error("项目登记表无法解析，第二级已停止：\n" + error.message);
+        }
+        if (!parsed || !Array.isArray(parsed.projects)) {
+            throw new Error("项目登记表结构不正确（缺少 projects 数组），第二级已停止。");
+        }
+
+        var problems = [];
+        parsed.projects.forEach(function (project, index) {
+            var label = project && typeof project.name === "string" && project.name
+                ? project.name
+                : "第 " + (index + 1) + " 项";
+            if (!project || typeof project.name !== "string" || !project.name) {
+                problems.push(label + "：缺少 name");
+            }
+            if (!project || !TYPE_SOURCES[project.type]) {
+                problems.push(label + "：type 必须是 work 或 code");
+            }
+            if (!project || typeof project.path !== "string" || !project.path) {
+                problems.push(label + "：缺少 path");
+            }
+        });
+        if (problems.length > 0) {
+            throw new Error("项目登记表存在以下问题，第二级已停止：\n" + problems.join("\n"));
+        }
+
+        return parsed;
+    }
+
+    async function loadTypeSources(app, registry) {
+        var needed = {};
+        registry.projects.forEach(function (project) {
+            needed[project.type] = true;
+        });
+
+        var sources = {};
+        var errors = {};
+        for (var typeKey in needed) {
+            var channel = TYPE_CHANNELS[typeKey];
+            try {
+                var text = await readVaultFile(app, channel.sourceVaultPath);
+                var extracted = channel.extractSource(text);
+                extracted.name = channel.sourceName;
+                extracted.vaultPath = channel.sourceVaultPath;
+                sources[typeKey] = extracted;
+            } catch (error) {
+                errors[typeKey] = channel.sourceName + "结构异常，该类型所有项目本轮停止：" + error.message;
+            }
+        }
+        return { sources: sources, errors: errors };
+    }
+
+    // 第二级按 Work／Code 分别构建计划；源加载失败的类型，其项目全部标记为 invalid。
+    function buildTypePlans(projects, sources, errors) {
+        var state = readChannelState(TYPE_CHANNELS.work);
+        var targets = [];
+        ["work", "code"].forEach(function (typeKey) {
+            var channel = TYPE_CHANNELS[typeKey];
+            var typeProjects = projects.filter(function (project) {
+                return project.type === typeKey;
+            });
+            if (typeProjects.length === 0) return;
+            var source = sources[typeKey] || null;
+            var sourceError = errors[typeKey] || null;
+            targets = targets.concat(buildChannelPlan(channel, typeProjects, source, sourceError, state).targets);
+        });
+        return { targets: targets };
+    }
+
+    // ===== 通用状态机（两级共用） =====
+
+    // 通道计划：对每个目标判定同步动作。动作含义：
+    //   initial-create 目标不存在且无基线，可从源创建
+    //   record-only    目标与源已一致但无基线，只需建立基线
+    //   unchanged      目标与源一致且已有基线
+    //   initial-review 首次接入且目标与源存在差异
+    //   sync           只有源变化，目标仍是上次分发版本
+    //   conflict       目标在上次同步后被外部修改
+    //   invalid        源加载失败或目标标题结构异常，该目标停止处理
+    function buildChannelPlan(channel, targetList, source, sourceError, state) {
+        var targets = [];
+
+        targetList.forEach(function (item) {
+            var target = {
+                channel: channel,
+                name: item.name,
+                type: item.type || null,
+                // 保留原始大小写供读写磁盘与显示；大小写无关的比较只在
+                // findSyncEntry／saveSyncEntry 内部做规范化。
+                path: item.path,
+                displayPath: item.displayPath || item.path,
+                source: source,
+                currentHash: null,
+                action: null,
+                reason: "",
+                sourceChangedSinceSync: false
+            };
+
+            if (sourceError) {
+                target.action = "invalid";
+                target.reason = sourceError;
+                targets.push(target);
+                return;
+            }
+
+            if (!fs.existsSync(target.path) || !fs.statSync(target.path).isFile()) {
+                var missing = findSyncEntry(channel, state, target.path);
+                if (missing) {
+                    target.action = "conflict";
+                    target.reason = channel.text.deletedAfterSync;
+                } else {
+                    target.action = "initial-create";
+                    target.reason = channel.text.initialCreate;
+                }
+                targets.push(target);
+                return;
+            }
+
+            var document;
+            try {
+                document = channel.readTargetDocument(target.path);
+            } catch (error) {
+                target.action = "invalid";
+                target.reason = channel.text.invalidStructure + error.message + channel.text.invalidStructureHint;
+                targets.push(target);
+                return;
+            }
+
+            var currentHash = hashText(document.section);
+            target.currentHash = currentHash;
+            var previous = findSyncEntry(channel, state, target.path);
+
+            if (currentHash === source.sectionHash) {
+                if (!previous) {
+                    target.action = "record-only";
+                    target.reason = channel.text.recordOnly;
+                } else {
+                    target.action = "unchanged";
+                    target.reason = channel.text.unchanged;
+                }
+            } else if (!previous) {
+                target.action = "initial-review";
+                target.reason = channel.text.initialReview;
+            } else if (currentHash !== previous[channel.hashFieldTarget]) {
+                target.action = "conflict";
+                target.sourceChangedSinceSync = source.sectionHash !== previous[channel.hashFieldSource];
+                target.reason = target.sourceChangedSinceSync
+                    ? channel.text.conflictBoth
+                    : channel.text.conflictTargetOnly;
+            } else if (source.sectionHash !== previous[channel.hashFieldSource]) {
+                target.action = "sync";
+                target.reason = channel.text.sync;
+            } else {
+                target.action = "unchanged";
+                target.reason = channel.text.unchangedNoChange;
+            }
+
+            targets.push(target);
+        });
+
+        return { targets: targets };
+    }
+
+    // 分发（含建立基线与覆盖确认）：目标不存在时从源生成完整文件，
+    // 已存在时只替换参与同步的部分，通道外的内容（如第三级）原样保留。
+    function applyChannelAction(channel, target) {
+        var exists = fs.existsSync(target.path) && fs.statSync(target.path).isFile();
+
+        if (target.action === "record-only" || target.action === "unchanged") {
+            if (!exists) {
+                throw new Error(channel.text.baselineNoFile + target.path);
+            }
+            var baselineDocument = channel.readTargetDocument(target.path);
+            if (hashText(baselineDocument.section) !== target.source.sectionHash) {
+                throw new Error(channel.text.baselineChanged + target.path);
+            }
+            saveSyncEntry(channel, target, target.source.section, baselineDocument.section);
+            return channel.text.baselineSaved;
+        }
+
+        if (!exists) {
+            // 首次接入，或冲突状态下文件被删除后的重建：从源生成完整文件。
+            backupAndWrite(target.path, target.source.fullBody, channel.backupDirectory);
+            saveSyncEntry(channel, target, target.source.section, target.source.section);
+            return channel.text.createdFromSource;
+        }
+
+        // 以下动作都针对已存在的目标文件，只替换参与同步的部分。
+        // 普通分发不允许在弹窗打开期间被悄悄改写；覆盖类动作属于用户明确授权。
+        var explicitOverwrite = target.action === "initial-review" || target.action === "conflict";
+        var document = channel.readTargetDocument(target.path);
+        var currentHash = hashText(document.section);
+
+        if (!explicitOverwrite && currentHash !== target.currentHash && currentHash !== target.source.sectionHash) {
+            throw new Error(channel.text.changedDuringDialog + target.path);
+        }
+
+        var newText = document.composeTargetText(target.source.section);
+        var backupPath = backupAndWrite(target.path, newText, channel.backupDirectory);
+        saveSyncEntry(channel, target, target.source.section, target.source.section);
+        return backupPath
+            ? channel.text.distributed + backupPath
+            : channel.text.distributedNoBackup;
+    }
+
+    // 回收：把目标当前参与同步的部分整体采纳进源笔记，并更新该目标的同步基线；
+    // 源侧未同步改动先备份到临时目录。
+    async function applyChannelRecycle(channel, target, app) {
+        var externalDocument = channel.readTargetDocument(target.path);
+        var externalSection = externalDocument.section;
+        var sourceDocument = channel.readSourceDocument(app);
+
+        if (sourceDocument.section === externalSection) {
+            saveSyncEntry(channel, target, externalSection, externalSection);
+            return channel.text.recycleIdentical;
+        }
+
+        var backupPath = backupVaultText(sourceDocument.raw, channel.sourceVaultPath, channel.backupDirectory);
+        await writeVaultFile(app, channel.sourceVaultPath, sourceDocument.composeSourceText(externalSection));
+        var previous = findSyncEntry(channel, readChannelState(channel), target.path);
+        var sourceHadDrift = !!previous && hashText(sourceDocument.section) !== previous[channel.hashFieldSource];
+        var entryText = channel.recycleEntryText(externalSection);
+        saveSyncEntry(channel, target, entryText, entryText);
+        return (backupPath ? channel.text.recycleBackup + backupPath + "\n" : "") +
+            channel.text.recycleDone +
+            (sourceHadDrift ? channel.text.recycleDrift : "") +
+            channel.text.recycleTail;
+    }
+
+    // ===== 行级对比合并（两级共用） =====
+
+    function showMergeModal(config) {
+        return new Promise(function (resolve) {
+            var ops;
+            try {
+                // 复核打开时的快照仍然有效（读取函数可能因文件变化抛错）。
+                if (config.getLeft() !== config.leftText || config.getRight() !== config.rightText) {
+                    throw new Error("两侧内容在打开前发生变化，请重新运行。");
+                }
+                ops = computeLineDiff(
+                    config.leftText.replace(/\n$/, "").split("\n"),
+                    config.rightText.replace(/\n$/, "").split("\n")
+                );
+            } catch (error) {
+                showMessage("行级对比失败", error.message || String(error)).then(function () {
+                    resolve("error");
+                });
+                return;
+            }
+
+            // 默认采纳外部侧（绿）行：合并起点即目标文件当前版本；
+            // 源侧（红）行需勾选才并入，避免替换行的新旧两个版本默认并存。
+            var keepFlags = ops.map(function (op) {
+                return op.type === "ins";
+            });
+
+            var hasDiff = ops.some(function (op) { return op.type !== "equal"; });
+            if (!hasDiff) {
+                // 两侧一致本身就是可信证据：安全条件下直接建立同步基线，
+                // 用户不必再重跑一次命令只为刷新卡片状态。
+                var identicalMessage;
+                try {
+                    identicalMessage = config.onIdentical
+                        ? config.onIdentical()
+                        : "两侧内容完全一致，无需合并。";
+                } catch (error) {
+                    identicalMessage = "两侧内容一致，但更新同步状态时失败：" +
+                        (error.message || String(error));
+                }
+                showMessage("没有差异", identicalMessage).then(function () {
+                    resolve("noop");
+                });
+                return;
+            }
+
+            var modal = createModal({
+                title: config.title, width: 900, widthVw: 96, maxHeight: 90,
+                onClose: function () { resolve("cancel"); }
+            });
+            modal.header.style.cssText =
+                "padding:14px 18px;font-size:16px;font-weight:600;" +
+                "border-bottom:1px solid var(--background-modifier-border);" +
+                "display:flex;justify-content:space-between;align-items:center;gap:12px;";
+            modal.header.appendChild(el("div",
+                "font-family:var(--font-monospace);font-size:11px;color:var(--text-muted);" +
+                "font-weight:400;word-break:break-all;max-width:60%;", config.pathText));
+
+            var body = modal.body;
+            body.style.cssText = "padding:0 18px;overflow:auto;flex:1;";
+
+            var help = el("div",
+                "padding:12px 0;line-height:1.6;color:var(--text-muted);font-size:12px;", config.helpText);
+
+            var listContainer = el("div",
+                "border:1px solid var(--background-modifier-border);border-radius:6px;" +
+                "font-family:var(--font-monospace);font-size:12px;line-height:1.7;");
+
+            var previewLabel = el("div", "margin:14px 0 6px;font-size:12px;font-weight:600;",
+                config.previewLabel || "合并后源侧内容（实时刷新）：");
+
+            var preview = el("pre",
+                "margin:0;padding:10px;border:1px solid var(--background-modifier-border);" +
+                "border-radius:6px;background:var(--background-secondary);" +
+                "font-family:var(--font-monospace);font-size:12px;line-height:1.6;" +
+                "white-space:pre-wrap;word-break:break-all;max-height:220px;overflow:auto;");
+
+            function refreshPreview() {
+                preview.textContent = composeMergedBody(ops, keepFlags);
+            }
+
+            ops.forEach(function (op, k) {
+                if (op.type === "equal") {
+                    listContainer.appendChild(el("div",
+                        "color:var(--text-muted);white-space:pre-wrap;word-break:break-all;" +
+                        "padding:0 10px;", "  " + (op.text === "" ? "" : op.text)));
+                    return;
+                }
+
+                var row = el("label",
+                    "display:flex;align-items:flex-start;gap:8px;padding:2px 10px;cursor:pointer;" +
+                    (op.type === "del"
+                        ? "background:rgba(255,80,80,.12);"
+                        : "background:rgba(80,200,120,.12);") +
+                    "white-space:pre-wrap;word-break:break-all;");
+
+                var cb = document.createElement("input");
+                cb.type = "checkbox";
+                cb.checked = keepFlags[k];
+                cb.style.cssText = "margin-top:4px;flex-shrink:0;";
+                cb.onchange = function () {
+                    keepFlags[k] = cb.checked;
+                    refreshPreview();
+                };
+
+                row.appendChild(cb);
+                row.appendChild(el("span", "flex-shrink:0;color:var(--text-faint);min-width:110px;",
+                    op.type === "del"
+                        ? "[仅" + config.sourceLabel + " L" + op.aLine + "]"
+                        : "[仅" + config.externalLabel + " L" + op.bLine + "]"));
+                row.appendChild(el("span", null, op.text === "" ? "（空行）" : op.text));
+                listContainer.appendChild(row);
+            });
+
+            var cancelButton = el("button", null, "取消");
+            cancelButton.onclick = function () {
+                modal.close();
+                resolve("cancel");
+            };
+
+            var applyButton = el("button", null, config.applyLabel || "写回源侧");
+            applyButton.className = "mod-cta";
+            applyButton.onclick = async function () {
+                applyButton.disabled = true;
+                try {
+                    // 复核弹窗打开期间两侧内容都没有再变化。
+                    if (config.getLeft() !== config.leftText) {
+                        throw new Error("源侧在弹窗打开期间发生了变化，已中止。请重新打开对比。");
+                    }
+                    if (config.getRight() !== config.rightText) {
+                        throw new Error("外部文件在弹窗打开期间发生了变化，已中止。请重新打开对比。");
+                    }
+
+                    var mergedText = composeMergedBody(ops, keepFlags);
+                    if (mergedText.replace(/\s+/g, "") === "") {
+                        throw new Error("合并结果为空，已中止。如确认清空，请手动处理。");
+                    }
+
+                    var resultMessage = await config.apply(mergedText);
+                    // 先落定结果再关闭：onClose 会按"取消"收场，Promise 已落定的结果不会被覆盖。
+                    resolve("applied");
+                    modal.close();
+                    showMessage("合并完成", resultMessage);
+                } catch (error) {
+                    applyButton.disabled = false;
+                    showMessage("写回失败", error.message || String(error));
+                }
+            };
+
+            body.appendChild(help);
+            body.appendChild(listContainer);
+            body.appendChild(previewLabel);
+            body.appendChild(preview);
+
+            modal.footer.appendChild(cancelButton);
+            modal.footer.appendChild(applyButton);
+            refreshPreview();
+        });
+    }
+
+    function buildChannelMergeConfig(channel, target, app) {
+        var sourceSectionNow = channel.readSourceSection(app);
+        var targetSectionNow = channel.readTargetSection(target.path);
+        return {
+            title: channel.text.mergeTitle(target),
+            pathText: target.displayPath,
+            helpText: channel.text.mergeHelp,
+            sourceLabel: channel.text.mergeSourceLabel,
+            externalLabel: target.name,
+            leftText: sourceSectionNow,
+            rightText: targetSectionNow,
+            getLeft: function () {
+                return channel.readSourceSection(app);
+            },
+            getRight: function () {
+                return channel.readTargetSection(target.path);
+            },
+            onIdentical: function () {
+                var diskSection = channel.readSourceSectionFromDisk();
+                if (diskSection !== sourceSectionNow) {
+                    return channel.text.mergeUnsavedSource;
+                }
+                saveSyncEntry(channel, target, diskSection, diskSection);
+                return channel.text.mergeIdentical;
+            },
+            applyLabel: channel.text.mergeApplyLabel,
+            previewLabel: "合并结果（同时写回两侧，实时刷新）：",
+            apply: async function (mergedSection) {
+                // 两侧先解析核对、再写回，避免写回一半留下不一致状态。
+                var normalized = channel.normalizeMerged(mergedSection);
+                var sourceDocument = channel.readSourceDocument(app);
+                var targetDocument = channel.readTargetDocument(target.path);
+
+                var messages = [];
+                if (sourceDocument.section !== normalized) {
+                    var sourceBackup = backupVaultText(sourceDocument.raw, channel.sourceVaultPath, channel.backupDirectory);
+                    await writeVaultFile(app, channel.sourceVaultPath, sourceDocument.composeSourceText(normalized));
+                    messages.push(channel.text.mergeSourceWritten + "（原文备份：" + sourceBackup + "）。");
+                } else {
+                    messages.push(channel.text.mergeSourceUntouched);
+                }
+                if (targetDocument.section !== normalized) {
+                    var targetBackup = backupAndWrite(
+                        target.path,
+                        targetDocument.composeTargetText(normalized),
+                        channel.backupDirectory
+                    );
+                    messages.push(channel.text.mergeTargetWritten(target) + "（原文备份：" + targetBackup + "）。");
+                } else {
+                    messages.push(target.name + channel.text.mergeTargetUntouchedTail);
+                }
+
+                saveSyncEntry(channel, target, normalized, normalized);
+                messages.push(channel.text.mergeDone);
+                return messages.join("\n");
+            }
+        };
+    }
+
+    // ===== 统一面板 =====
+
+    // 冲突卡片的双向按钮组：主按钮随分歧来源确定——只有一侧改过时指向该侧方向，
+    // 两侧都改过时主按钮为行级对比合并；目标文件被删除时只剩重建一个动作。
+    function buildConflictButtons(spec) {
+        if (!spec.fileExists) {
+            return [{ label: spec.overwriteLabel, primary: true, run: spec.overwriteRun }];
+        }
+        var recycleButton = { label: spec.recycleLabel, primary: !spec.sourceChanged, run: spec.recycleRun };
+        var overwriteButton = { label: spec.overwriteLabel, run: spec.overwriteRun };
+        var mergeButton = { label: "行级对比合并…", primary: !!spec.sourceChanged, openMerge: spec.openMerge };
+        return spec.sourceChanged
+            ? [mergeButton, recycleButton, overwriteButton]
+            : [recycleButton, overwriteButton, mergeButton];
+    }
+
+    // 单个通道的目标卡片：按钮组装两级共用，差异（按钮文字）来自通道配置。
+    // unregister 由面板提供（第二级专用）：移除登记后清待处理计数；第一级不传。
+    function appendChannelTargets(pane, targets, key, app, wrapRun, unregister) {
+        targets.forEach(function (target) {
+            var buttons = [];
+            var fileExists = fs.existsSync(target.path);
+            var channel = target.channel;
+            var labels = channel.labels;
+            var distribute = wrapRun(key, target, function () {
+                return applyChannelAction(channel, target);
+            });
+            var recycle = wrapRun(key, target, function () {
+                return applyChannelRecycle(channel, target, app);
+            });
+            var canMerge = ["conflict", "initial-review"].indexOf(target.action) >= 0 && fileExists;
+            var openMerge = canMerge ? function () {
+                return showMergeModal(buildChannelMergeConfig(channel, target, app));
+            } : null;
+
+            if (target.action === "unchanged") {
+                buttons.push({ label: "已同步", disabled: true });
+            } else if (target.action === "sync") {
+                buttons.push({ label: "备份并分发", primary: true, run: distribute });
+            } else if (target.action === "initial-create") {
+                buttons.push({ label: labels.initialCreateButton, primary: true, run: distribute });
+            } else if (target.action === "record-only") {
+                buttons.push({ label: "建立同步基线", primary: true, run: distribute });
+            } else if (target.action === "initial-review") {
+                buttons.push({ label: labels.reviewDistribute, primary: true, run: distribute });
+                buttons.push({ label: labels.recycle, run: recycle });
+                buttons.push({ label: "行级对比合并…", openMerge: openMerge });
+            } else if (target.action === "conflict") {
+                buttons = buildConflictButtons({
+                    fileExists: fileExists,
+                    sourceChanged: target.sourceChangedSinceSync,
+                    recycleLabel: labels.recycle,
+                    recycleRun: recycle,
+                    overwriteLabel: fileExists ? labels.overwriteExisting : labels.overwriteMissing,
+                    overwriteRun: distribute,
+                    openMerge: openMerge
+                });
+            }
+
+            // 第二级卡片提供移除登记入口（右上角 ×）；第一级目标清单硬编码在脚本顶部，增删直接改脚本。
+            var removeEntry = null;
+            if (unregister && channel.id !== "user") {
+                removeEntry = {
+                    remove: function () { return unregisterProject(target); },
+                    afterRemove: function () { unregister(key, target); }
+                };
+            }
+
+            appendCard(pane, {
+                title: target.name,
+                pathText: target.displayPath,
+                reason: target.reason,
+                buttons: buttons,
+                removeEntry: removeEntry
+            });
+        });
+    }
+
+    // ===== 弹窗骨架（各弹窗共用） =====
+
+    // 创建带样式的元素；cssText、textContent 为空时跳过对应设置。
+    function el(tag, cssText, textContent) {
+        var node = document.createElement(tag);
+        if (cssText) node.style.cssText = cssText;
+        if (textContent) node.textContent = textContent;
+        return node;
+    }
+
+    function createModal(options) {
+        const dialog = plugin.openDialog(options.title, options.onClose);
+        dialog.modalEl.style.width = "min(" + options.width + "px, " + options.widthVw + "vw)";
+        dialog.modalEl.style.maxHeight = options.maxHeight + "vh";
+        const footer = el("div", null);
+        footer.className = "modal-button-container";
+        dialog.modalEl.appendChild(footer);
+        return { header: dialog.titleEl, body: dialog.contentEl, footer, close: () => dialog.close() };
+    }
+
+    // 把输入路径归一为 AGENTS.md 完整路径写入登记表，并返回该项目的计划目标。
+    // 接受文件夹路径或文件路径，兼容反斜杠与资源管理器复制的带引号路径；
+    // 项目名自动取文件夹名。返回 { target } 或 { error }。
+    function registerProject(app, typeKey, inputText) {
+        var raw = String(inputText || "").trim()
+            .replace(/^["']+|["']+$/g, "")
+            .replace(/\\/g, "/");
+        if (raw.startsWith("~/")) raw = path.join(os.homedir(), raw.slice(2)).replace(/\\/g, "/");
+        if (!path.isAbsolute(raw)) return { error: "请填写绝对路径。" };
+        if (!raw) {
+            return { error: "请先粘贴项目路径。" };
+        }
+        raw = raw.replace(/[\\/]+$/, "");
+        var filePath = /\/AGENTS\.md$/i.test(raw) ? raw : raw + "/AGENTS.md";
+        var folder = filePath.slice(0, filePath.length - "/AGENTS.md".length);
+        if (!fs.existsSync(folder) || !fs.statSync(folder).isDirectory()) {
+            return { error: "目录不存在，请确认路径：" + folder };
+        }
+
+        var registry = readRegistry();
+        var key = canonicalPath(filePath);
+        var duplicate = registry.projects.find(function (project) {
+            return canonicalPath(project.path) === key;
+        });
+        if (duplicate) {
+            return { error: "该项目已在登记表中：" + duplicate.name };
+        }
+
+        var name = path.basename(folder);
+        registry.projects.push({ name: name, type: typeKey, path: filePath });
+        fs.mkdirSync(STATE_ROOT, { recursive: true });
+        writeState(REGISTRY_PATH, registry);
+
+        var channel = TYPE_CHANNELS[typeKey];
+        var source = null;
+        var sourceError = null;
+        try {
+            var text = syncReadVault(app, channel.sourceVaultPath);
+            source = channel.extractSource(text);
+            source.name = channel.sourceName;
+            source.vaultPath = channel.sourceVaultPath;
+        } catch (error) {
+            sourceError = channel.sourceName + "结构异常，该类型所有项目本轮停止：" + (error.message || String(error));
+        }
+        var plan = buildChannelPlan(channel, [{ name: name, type: typeKey, path: filePath }], source, sourceError, readChannelState(channel));
+        return { target: plan.targets[0] };
+    }
+
+    // 从登记表移除项目并同步清理其基线条目；项目文件本身不动，重新登记即可恢复跟踪。
+    // 先读后写：登记表或状态文件读取失败时整体不执行，避免登记已删而基线残留。
+    function unregisterProject(target) {
+        var key = canonicalPath(target.path);
+        var registry = readRegistry();
+        var registryIndex = registry.projects.findIndex(function (project) {
+            return canonicalPath(project.path) === key;
+        });
+        if (registryIndex < 0) {
+            throw new Error("项目已不在登记表中：" + (target.displayPath || target.path));
+        }
+
+        var channel = TYPE_CHANNELS[target.type] || null;
+        var state = channel ? readChannelState(channel) : null;
+        var entries = state && Array.isArray(state.projects) ? state.projects : null;
+        var stateIndex = entries
+            ? entries.findIndex(function (entry) { return canonicalPath(entry.path) === key; })
+            : -1;
+
+        registry.projects.splice(registryIndex, 1);
+        fs.mkdirSync(STATE_ROOT, { recursive: true });
+        writeState(REGISTRY_PATH, registry);
+        if (stateIndex >= 0) {
+            entries.splice(stateIndex, 1);
+            state.updatedAt = new Date().toISOString();
+            writeState(channel.statePath, state);
+        }
+
+        return "已移除 " + target.name + " 的登记与同步基线；项目文件未改动，重新登记可恢复跟踪。";
+    }
+
+    // 类型标签页顶部的登记输入行；登记成功后经 onRegistered 追加该项目卡片，
+    // 校验失败在输入行下方红字提示，不动登记表。
+    function appendRegisterRow(pane, typeKey, typeName, app, onRegistered) {
+        var row = el("div", "display:flex;gap:8px;margin-bottom:10px;");
+        var input = el("input",
+            "flex:1;padding:6px 10px;border:1px solid var(--background-modifier-border);" +
+            "border-radius:6px;font-size:13px;");
+        input.placeholder = "粘贴项目文件夹或 AGENTS.md 路径";
+        var button = el("button", null, "登记为 " + typeName + " 项目");
+        var error = el("div",
+            "color:var(--text-error);font-size:12px;line-height:1.5;margin:-4px 0 10px;");
+
+        var run = function () {
+            error.textContent = "";
+            var result;
+            try {
+                result = registerProject(app, typeKey, input.value);
+            } catch (err) {
+                error.textContent = err.message || String(err);
+                return;
+            }
+            if (result.error) {
+                error.textContent = result.error;
+                return;
+            }
+            input.value = "";
+            onRegistered(result.target);
+        };
+        button.onclick = run;
+        input.onkeydown = function (event) {
+            if (event.key === "Enter") run();
+        };
+
+        row.appendChild(input);
+        row.appendChild(button);
+        pane.appendChild(row);
+        pane.appendChild(error);
+    }
+
+    function appendSectionHeader(content, title, subtitle) {
+        var header = el("div",
+            "margin:6px 0 10px;padding:8px 12px;background:var(--background-secondary);" +
+            "border-radius:6px;font-weight:600;", title);
+        if (subtitle) {
+            header.appendChild(el("div",
+                "font-weight:400;font-size:11px;color:var(--text-muted);margin-top:3px;" +
+                "font-family:var(--font-monospace);word-break:break-all;", subtitle));
+        }
+        content.appendChild(header);
+    }
+
+    // card.removeEntry（第二级专用）：卡片右上角 × 入口，确认后移除登记并整卡消失，
+    // 与底部「处理同步状态」的动作按钮在视觉与语义上分开。
+    function appendCard(content, card) {
+        var row = el("div",
+            "border:1px solid var(--background-modifier-border);border-radius:6px;" +
+            "padding:14px;margin-bottom:12px;");
+        var status = el("div", "margin:10px 0;line-height:1.55;white-space:pre-wrap;", card.reason);
+        var buttonRow = el("div", "display:flex;gap:8px;flex-wrap:wrap;");
+
+        // 标题行：左侧标题与路径，右上角可放移除入口。
+        var header = el("div", "display:flex;align-items:flex-start;gap:8px;");
+        var titleBlock = el("div", "flex:1;min-width:0;");
+        titleBlock.appendChild(el("div", "font-weight:600;margin-bottom:5px;", card.title));
+        titleBlock.appendChild(el("div",
+            "font-family:var(--font-monospace);font-size:12px;color:var(--text-muted);" +
+            "word-break:break-all;", card.pathText));
+        header.appendChild(titleBlock);
+
+        if (card.removeEntry) {
+            var remove = card.removeEntry;
+            var closeButton = el("button",
+                "background:transparent;border:none;box-shadow:none;cursor:pointer;" +
+                "padding:0 4px;color:var(--text-faint);font-size:18px;line-height:1;" +
+                "flex-shrink:0;", "×");
+            closeButton.setAttribute("aria-label", "移除登记");
+            closeButton.title = "移除登记（项目文件不改动）";
+            closeButton.onmouseenter = function () { closeButton.style.color = "var(--text-error)"; };
+            closeButton.onmouseleave = function () { closeButton.style.color = "var(--text-faint)"; };
+            closeButton.onclick = function () {
+                showConfirm(
+                    "移除登记",
+                    "将把 " + card.title + " 从项目登记表移除，并清理它的同步基线。\n" +
+                        "项目文件夹和 AGENTS.md 不会改动；重新登记即可恢复跟踪。",
+                    "移除登记"
+                ).then(function (confirmed) {
+                    if (!confirmed) return;
+                    try {
+                        var message = remove.remove();
+                        row.remove();
+                        if (remove.afterRemove) remove.afterRemove();
+                        showMessage("移除登记", message);
+                    } catch (error) {
+                        status.textContent = "移除登记未完成：" + (error.message || String(error));
+                    }
+                });
+            };
+            header.appendChild(closeButton);
+        }
+
+        var runButtons = [];
+        (card.buttons || []).forEach(function (entry) {
+            var button = el("button", null, entry.label);
+            if (entry.disabled) {
+                button.disabled = true;
+            } else if (entry.primary) {
+                button.className = "mod-cta";
+            }
+
+            if (entry.openMerge) {
+                button.onclick = function () {
+                    button.disabled = true;
+                    entry.openMerge().then(function (result) {
+                        // 合并已写回两侧，本卡片一键动作基于的旧内容全部失效。
+                        if (result === "applied") {
+                            runButtons.forEach(function (other) {
+                                other.disabled = true;
+                            });
+                        }
+                        button.disabled = result === "applied";
+                    });
+                };
+            } else if (!entry.disabled) {
+                button.onclick = async function () {
+                    button.disabled = true;
+                    status.textContent = "正在处理……";
+                    try {
+                        status.textContent = await entry.run();
+                        button.textContent = "已完成";
+                        button.className = "";
+                        // 一个动作成功后卡片状态已改变，其余一键动作基于的是过期内容，全部停用。
+                        runButtons.forEach(function (other) {
+                            other.disabled = true;
+                        });
+                    } catch (error) {
+                        status.textContent = "未完成：" + (error.message || String(error));
+                        button.disabled = false;
+                    }
+                };
+                runButtons.push(button);
+            }
+
+            buttonRow.appendChild(button);
+        });
+
+        row.appendChild(header);
+        row.appendChild(status);
+        row.appendChild(buttonRow);
+        content.appendChild(row);
+    }
+
+    function showPanel(app, layer1, layer2) {
+        return new Promise(function (resolve) {
+            var modal = createModal({
+                title: "分发与回收指令", width: 880, widthVw: 95, maxHeight: 88,
+                onClose: resolve
+            });
+            var content = modal.body;
+            content.style.cssText = "padding:16px 18px;overflow:auto;";
+
+            content.appendChild(el("div",
+                "margin-bottom:14px;line-height:1.6;color:var(--text-muted);",
+                "每个目标单独处理；检测到冲突时不会自动覆盖。第一级分发整份正文；" +
+                "第二级只同步第 1 个「# 」一级标题到第 2 个之间的区块，第 2 个一级标题及其后内容永不改动。"));
+
+            // ===== 标签栏：第一级与第二级的 Work／Code 各占一个标签页 =====
+            // 待处理数 = 需要用户动手的目标数（unchanged 以外的动作）；整级不可用时记 1。
+            var paneDefs = [];
+            var layer1Pending = 0;
+            if (layer1.error) {
+                layer1Pending = 1;
+            } else {
+                layer1.plan.targets.forEach(function (target) {
+                    if (target.action !== "unchanged") layer1Pending += 1;
+                });
+            }
+            paneDefs.push({ key: "layer1", label: "第一级：用户级指令", pending: layer1Pending });
+
+            if (layer2.error) {
+                paneDefs.push({ key: "layer2", label: "第二级：类型指令", pending: 1 });
+            } else {
+                ["work", "code"].forEach(function (typeKey) {
+                    var targets = layer2.plan.targets.filter(function (target) {
+                        return target.type === typeKey;
+                    });
+                    var pending = 0;
+                    targets.forEach(function (target) {
+                        if (target.action !== "unchanged") pending += 1;
+                    });
+                    paneDefs.push({
+                        key: "type-" + typeKey,
+                        label: "第二级：" + (typeKey === "work" ? "Work" : "Code") + " 类型",
+                        pending: pending,
+                        type: typeKey,
+                        targets: targets
+                    });
+                });
+                // 登记表为空时没有可拆的类型，回落为单个第二级标签页。
+                if (paneDefs.length === 1) {
+                    paneDefs.push({ key: "layer2", label: "第二级：类型指令", pending: 0 });
+                }
+            }
+
+            var TAB_BASE_STYLE =
+                "flex:1;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;box-shadow:none;" +
+                "background:transparent;border:1px solid transparent;color:var(--text-muted);";
+            var TAB_ACTIVE_STYLE =
+                "flex:1;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;box-shadow:none;" +
+                "background:var(--background-secondary);border:1px solid var(--background-modifier-border);" +
+                "color:var(--text-normal);font-weight:600;";
+
+            var tabBar = el("div", "display:flex;gap:8px;margin-bottom:12px;");
+            var tabs = {};
+            var panes = {};
+
+            var refreshTabLabels = function () {
+                paneDefs.forEach(function (def) {
+                    tabs[def.key].textContent = def.label +
+                        (def.pending > 0 ? "（" + def.pending + " 待处理）" : "");
+                });
+            };
+            var activateTab = function (key) {
+                paneDefs.forEach(function (def) {
+                    tabs[def.key].style.cssText = def.key === key ? TAB_ACTIVE_STYLE : TAB_BASE_STYLE;
+                    panes[def.key].style.display = def.key === key ? "" : "none";
+                });
+            };
+            var settlePending = function (key, wasPending) {
+                if (!wasPending) return;
+                paneDefs.forEach(function (def) {
+                    if (def.key === key) def.pending = Math.max(0, def.pending - 1);
+                });
+                refreshTabLabels();
+            };
+
+            // 一键动作的统一收尾：成功执行后刷新待处理计数。
+            var wrapRun = function (key, target, apply) {
+                return async function () {
+                    var wasPending = target.action !== "unchanged";
+                    var result = await apply();
+                    target.action = "unchanged";
+                    settlePending(key, wasPending);
+                    return result;
+                };
+            };
+
+            // 移除登记的收尾：卡片已随动作消失，这里只清待处理计数。
+            var wrapUnregister = function (key, target) {
+                var wasPending = target.action !== "unchanged";
+                target.action = "unchanged";
+                settlePending(key, wasPending);
+            };
+
+            content.appendChild(tabBar);
+            paneDefs.forEach(function (def) {
+                tabs[def.key] = document.createElement("button");
+                panes[def.key] = document.createElement("div");
+                tabs[def.key].onclick = function () { activateTab(def.key); };
+                tabBar.appendChild(tabs[def.key]);
+                content.appendChild(panes[def.key]);
+            });
+            refreshTabLabels();
+
+            // ===== 第一级区块 =====
+            appendSectionHeader(panes.layer1, "第一级：用户级指令", "源：" + LAYER1_SOURCE + "　状态：" + LAYER1_STATE_PATH);
+            if (layer1.error) {
+                appendCard(panes.layer1, {
+                    title: "第一级不可用",
+                    pathText: LAYER1_SOURCE,
+                    reason: layer1.error
+                });
+            } else {
+                appendChannelTargets(panes.layer1, layer1.plan.targets, "layer1", app, wrapRun);
+            }
+
+            // ===== 第二级区块：按类型分标签页 =====
+            paneDefs.slice(1).forEach(function (def) {
+                if (def.key === "layer2") {
+                    appendSectionHeader(panes.layer2, "第二级：类型指令（工作规范区块）", "登记表：" + REGISTRY_PATH);
+                    if (layer2.error) {
+                        appendCard(panes.layer2, {
+                            title: "第二级不可用",
+                            pathText: REGISTRY_PATH,
+                            reason: layer2.error
+                        });
+                    } else {
+                        appendCard(panes.layer2, {
+                            title: "没有登记项目",
+                            pathText: REGISTRY_PATH,
+                            reason: "项目登记表当前为空；在 instruction-projects.json 的 projects 中登记后重新运行。"
+                        });
+                    }
+                    return;
+                }
+                appendSectionHeader(
+                    panes[def.key],
+                    "第二级：" + (def.type === "work" ? "Work" : "Code") + " 类型（工作规范区块）",
+                    "源：" + TYPE_SOURCES[def.type].vaultPath + "　登记表：" + REGISTRY_PATH
+                );
+                appendRegisterRow(panes[def.key], def.type, def.type === "work" ? "Work" : "Code", app, function (target) {
+                    def.targets.push(target);
+                    layer2.plan.targets.push(target);
+                    if (target.action !== "unchanged") {
+                        def.pending += 1;
+                        refreshTabLabels();
+                    }
+                    appendChannelTargets(panes[def.key], [target], def.key, app, wrapRun, wrapUnregister);
+                });
+                appendChannelTargets(panes[def.key], def.targets, def.key, app, wrapRun, wrapUnregister);
+            });
+
+            // 打开时停在第一个有待处理的标签页；都没有待处理则显示第一个。
+            var defaultKey = paneDefs[0].key;
+            for (var i = 0; i < paneDefs.length; i++) {
+                if (paneDefs[i].pending > 0) { defaultKey = paneDefs[i].key; break; }
+            }
+            activateTab(defaultKey);
+
+            var closeButton = el("button", null, "关闭");
+            closeButton.className = "mod-cta";
+            closeButton.onclick = function () { modal.close(); };
+            modal.footer.appendChild(closeButton);
+        });
+    }
+
+    // 轻量确认弹窗：确认 resolve(true)，取消或关闭 resolve(false)。
+    // 确认按钮先落定结果再关闭，onClose 的 resolve(false) 不会覆盖已落定的值。
+    function showConfirm(title, message, confirmLabel) {
+        return new Promise(function (resolve) {
+            var modal = createModal({
+                title: title, width: 520, widthVw: 90, maxHeight: 70,
+                onClose: function () { resolve(false); }
+            });
+            modal.body.style.cssText =
+                "padding:16px 18px;overflow:auto;white-space:pre-wrap;line-height:1.6;font-size:13px;";
+            modal.body.textContent = message;
+
+            var cancelButton = el("button", null, "取消");
+            cancelButton.onclick = function () { modal.close(); };
+            var okButton = el("button", null, confirmLabel || "确认");
+            okButton.className = "mod-cta";
+            okButton.onclick = function () {
+                resolve(true);
+                modal.close();
+            };
+            modal.footer.appendChild(cancelButton);
+            modal.footer.appendChild(okButton);
+        });
+    }
+
+    function showMessage(title, message) {
+        return new Promise(function (resolve) {
+            var modal = createModal({
+                title: title, width: 760, widthVw: 95, maxHeight: 85,
+                onClose: resolve
+            });
+            modal.body.style.cssText =
+                "padding:18px;overflow:auto;white-space:pre-wrap;line-height:1.6;font-size:13px;";
+            modal.body.textContent = message;
+
+            var button = el("button", null, "关闭");
+            button.className = "mod-cta";
+            button.onclick = function () { modal.close(); };
+            modal.footer.appendChild(button);
+        });
+    }
+
+    await displayPanel();
+}
+
+module.exports = { openInstructions };

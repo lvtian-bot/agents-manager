@@ -1,0 +1,9 @@
+{
+  "id": "agents-manager",
+  "name": "多 Agent 管理",
+  "version": "0.0.1",
+  "minAppVersion": "1.15.1",
+  "description": "在多个 Agent 之间分发、回收和合并共用指令，并支持笔记总结和选区翻译。",
+  "author": "lvtian-bot",
+  "isDesktopOnly": true
+}

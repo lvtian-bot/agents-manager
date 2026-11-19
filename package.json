@@ -1,0 +1,14 @@
+{
+  "name": "agents-manager",
+  "version": "0.0.1",
+  "private": true,
+  "description": "管理多个 Agent 的共用指令，并提供笔记总结和选区翻译。",
+  "scripts": {
+    "build": "esbuild src/plugin.js --bundle --platform=node --format=cjs --external:obsidian --drop:console --outfile=main.js",
+    "test": "npm run build && node --test",
+    "test:vault": "npm run build && node scripts/create-test-vault.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}
