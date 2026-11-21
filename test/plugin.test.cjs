@@ -138,7 +138,7 @@ async function loadPlugin(app, options = {}) {
             }
             return require(name);
         },
-        process: { env: { SILICONFLOW_API_KEY: "test-key" } },
+        process: { env: { TEST_MODEL_API_KEY: "test-key" } },
         console: { log() {}, error: (error) => assert.fail(String(error)) },
         fetch: options.fetch,
         TextDecoder, URL, AbortController,
@@ -187,7 +187,14 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
         assert.equal(fresh.settings.summaryMode, "single");
         assert.equal(fresh.settings.typeProperty, "");
         fs.mkdirSync(path.join(fixtureDir, ".obsidian", "nascence-sync"), { recursive: true });
-        const { plugin } = await loadPlugin(app, { ...options, settings: { templates: { 文章: "旧模板.md" }, extra: 7 } });
+        const { plugin } = await loadPlugin(app, {
+            ...options,
+            settings: {
+                templates: { 文章: "旧模板.md" }, extra: 7,
+                endpoint: "https://legacy.example.org/v1/chat/completions",
+                model: "saved-model", credentialVariable: "SAVED_API_KEY",
+            },
+        });
         const tab = plugin.settingTab;
         const root = tab.containerEl = new Element("div");
         const nodes = predicate => findElements(root, predicate);
@@ -200,6 +207,9 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
         assert.equal(button("添加目标").disabled, true);
         assert.equal(fields("提示词笔记")[0].value, "旧模板.md");
         assert.equal(fields("总结模式")[0].value, "multiple");
+        assert.equal(fields("模型接口")[0].value, "https://legacy.example.org/v1/chat/completions");
+        assert.equal(fields("模型名称")[0].value, "saved-model");
+        assert.equal(fields("凭据环境变量名")[0].value, "SAVED_API_KEY");
         assert.ok(nodes(element => element.tag === "details").every(element => !element.open));
         fields("选择未匹配时使用的提示词")[0].onclick();
         assert.equal(fields("未匹配时使用的提示词")[0].value, "模板/摘要.md");
@@ -221,6 +231,8 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
         assert.equal(saved[0].targets.Codex, undefined);
         assert.equal(saved[0].targets.Claude, "~/.claude/CLAUDE.md");
         assert.equal(saved[0].extra, 7);
+        assert.equal(saved[0].model, "saved-model");
+        assert.equal(saved[0].credentialVariable, "SAVED_API_KEY");
         assert.deepEqual(notices, ["设置已保存。"]);
         tab.display();
         assert.equal(fields("未匹配时使用的提示词")[0].value, "模板/摘要.md");
@@ -252,6 +264,45 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
     } finally {
         fs.rmSync(fixtureDir, { recursive: true, force: true });
     }
+});
+
+test("全新安装可保存指令设置，模型连接留空时不发起 AI 请求", async () => {
+    const notices = [];
+    const saved = [];
+    const app = {
+        workspace: {
+            getActiveFile: () => ({ path: "笔记.md" }),
+            activeEditor: { editor: { getSelection: () => "Selected text" } },
+        },
+    };
+    const { body, invoke, plugin } = await loadPlugin(app, {
+        notices,
+        save: settings => saved.push(settings),
+        fetch: () => assert.fail("模型连接留空时不应发起请求"),
+    });
+    const tab = plugin.settingTab;
+    const root = tab.containerEl = new Element("div");
+    tab.display();
+    const field = label => findElements(root, el => el.getAttribute("aria-label") === label)[0];
+    const [save] = findElements(root, el => el.tag === "button" && el.textContent === "保存设置");
+    for (const label of ["模型接口", "模型名称", "凭据环境变量名"]) assert.equal(field(label).value, "");
+
+    field("用户指令源笔记").value = "我的指令.md";
+    await save.onclick();
+    assert.equal(saved[0].userSource, "我的指令.md");
+    assert.equal(saved[0].endpoint, "");
+    assert.equal(saved[0].model, "");
+    assert.equal(saved[0].credentialVariable, "");
+
+    field("模型接口").value = "https://example.org/v1/chat/completions";
+    await save.onclick();
+    assert.equal(saved.length, 1);
+    assert.equal(field("模型名称").getAttribute("aria-invalid"), "true");
+
+    await invoke("summarize-note");
+    await invoke("translate-selection");
+    assert.deepEqual(notices, ["设置已保存。", "请填写完整的模型接口地址。", "请填写完整的模型接口地址。"]);
+    assert.equal(body.children.length, 0);
 });
 
 test("没有选区时翻译只提示，不发起模型请求", async () => {
@@ -309,14 +360,18 @@ test("AI 命令保持选区翻译、按类型总结及流式内容写回", async
 
         const plugin = await loadPlugin(app, {
             settings: {
+                endpoint: "https://example.org/v1/chat/completions",
+                model: "my-model", credentialVariable: "TEST_MODEL_API_KEY",
                 typeProperty: "文章类型",
                 ...(mode ? { summaryMode: mode, singleTemplate: "docs/prompts/文献总结-单独.md" } : {}),
                 templates: { 新闻报道: "docs/prompts/文献总结-新闻简讯.md", 观点视角: "docs/prompts/文献总结-观点视角.md", 知识教程: "docs/prompts/文献总结-知识教程.md" },
                 defaultTemplate: "docs/prompts/文献总结-观点视角.md",
             },
             async fetch(url, request) {
-                assert.equal(url, "https://api.siliconflow.cn/v1/chat/completions");
+                assert.equal(url, "https://example.org/v1/chat/completions");
+                assert.equal(request.headers.Authorization, "Bearer test-key");
                 const body = JSON.parse(request.body);
+                assert.equal(body.model, "my-model");
                 assert.equal(body.stream, true);
                 if (!template) {
                     assert.match(body.messages[0].content, /Selected passage/);

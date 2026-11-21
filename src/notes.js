@@ -57,6 +57,9 @@ async function editWithAI(plugin, action) {
     const originalSelection = editor?.getSelection() || "";
     const translating = action === "translation";
     if (translating && !originalSelection.trim()) throw new Error("请先选中要翻译的外文。");
+    if (!settings.endpoint) throw new Error("请填写完整的模型接口地址。");
+    if (!settings.model) throw new Error("此项不能为空。");
+    if (!settings.credentialVariable) throw new Error("请填写有效的环境变量名。");
     const from = editor?.getCursor?.("from");
     const to = editor?.getCursor?.("to");
     const original = editor?.getValue?.() ?? await app.vault.read(file);

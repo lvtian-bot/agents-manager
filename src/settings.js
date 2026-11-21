@@ -20,8 +20,7 @@ function loadSettings(app, data) {
     const existing = root && fs.existsSync(path.join(root, app.vault.configDir || ".obsidian", "nascence-sync"));
     const hasRules = Object.keys(saved.templates || {}).length > 0;
     return {
-        endpoint: "https://api.siliconflow.cn/v1/chat/completions",
-        model: "deepseek-ai/DeepSeek-V4-Flash", credentialVariable: "SILICONFLOW_API_KEY",
+        endpoint: "", model: "", credentialVariable: "",
         typeProperty: hasRules ? "content_type" : "", templates: {}, defaultTemplate: "",
         singleTemplate: saved.defaultTemplate || "",
         summaryMode: hasRules ? "multiple" : "single",
@@ -168,6 +167,7 @@ class ManagerSettings extends PluginSettingTab {
             const input = textInput(item.controlEl, label, plugin.settings[key]);
             if (parse === vaultPath) noteButton(item.controlEl, plugin, input);
             readers.set(key, () => read(input, row, parse));
+            return input;
         }
         function mapping(parent, key, title, nameLabel, pathLabel, addLabel, parse) {
             const action = new Setting(parent).setName(title);
@@ -238,12 +238,17 @@ class ManagerSettings extends PluginSettingTab {
         mode.onchange = showMode;
         showMode();
         const model = disclosure(container, "模型连接");
-        field(model, "endpoint", "模型接口", "兼容 Chat Completions 的完整请求地址。", modelEndpoint);
-        field(model, "model", "模型名称", "", required);
-        field(model, "credentialVariable", "凭据环境变量名", "只填写变量名。", value => {
-            if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) throw new Error("请填写有效的环境变量名。");
-            return value;
-        });
+        function validateConnectionField(validate) {
+            return value => connectionInputs.some(input => input.value.trim()) ? validate(value) : "";
+        }
+        const connectionInputs = [
+            field(model, "endpoint", "模型接口", "兼容 Chat Completions 的完整请求地址。", validateConnectionField(modelEndpoint)),
+            field(model, "model", "模型名称", "", validateConnectionField(required)),
+            field(model, "credentialVariable", "凭据环境变量名", "只填写变量名。", validateConnectionField(value => {
+                if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) throw new Error("请填写有效的环境变量名。");
+                return value;
+            })),
+        ];
         new Setting(container).addButton(button => button.setButtonText("保存设置").setCta().onClick(async () => {
             clearError();
             button.setDisabled(true);

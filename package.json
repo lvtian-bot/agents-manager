@@ -1,6 +1,6 @@
 {
   "name": "agents-manager",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "description": "管理多个 Agent 的共用指令，并提供笔记总结和选区翻译。",
   "scripts": {
