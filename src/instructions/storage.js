@@ -41,16 +41,17 @@ function readText(file) {
 }
 
 function replaceText(file, value) {
+    // Resolve each link even if the final backing file has not been created yet.
+    const visited = new Set();
+    while (fs.lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink()) {
+        if (visited.has(file)) throw new Error("文件存在循环符号链接：" + file);
+        visited.add(file);
+        file = path.resolve(path.dirname(file), fs.readlinkSync(file));
+    }
     if (value === null) { fs.unlinkSync(file); return; }
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const temp = file + "." + randomUUID() + ".tmp";
     try {
-        // Preserve existing permissions and follow a symlink to its backing file.
-        const target = fs.existsSync(file) ? fs.realpathSync(file) : file;
-        if (target !== path.resolve(file) && fs.lstatSync(file).isSymbolicLink()) {
-            replaceText(target, value);
-            return;
-        }
         const mode = fs.existsSync(file) ? fs.statSync(file).mode : 0o600;
         fs.writeFileSync(temp, value, { mode, flag: "wx" });
         fs.renameSync(temp, file);

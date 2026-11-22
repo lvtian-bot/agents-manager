@@ -643,3 +643,28 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
     button("关闭").onclick();
     await bulkPanel;
 });
+
+test("分发和撤销时保留目标符号链接", t => {
+    const { replaceText } = require("../src/instructions/storage");
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "agents-manager-link-"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const link = path.join(root, "AGENTS.md");
+    const backing = path.join(root, "shared.md");
+    try { fs.symlinkSync("shared.md", link, "file"); }
+    catch (error) {
+        if (error.code !== "EPERM") throw error;
+        // Exercise link resolution on Windows test hosts without symlink privileges.
+        const lstat = fs.lstatSync;
+        t.mock.method(fs, "lstatSync", (file, options) => file === link
+            ? { isSymbolicLink: () => true } : lstat(file, options));
+        t.mock.method(fs, "readlinkSync", file => {
+            assert.equal(file, link);
+            return "shared.md";
+        });
+    }
+    replaceText(link, "新内容");
+    assert.equal(fs.readFileSync(backing, "utf8"), "新内容");
+    replaceText(link, null);
+    assert.equal(fs.existsSync(backing), false);
+    assert.ok(fs.lstatSync(link).isSymbolicLink());
+});
