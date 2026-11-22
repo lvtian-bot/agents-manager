@@ -7,7 +7,7 @@ const project = fileURLToPath(new URL("../", import.meta.url));
 const root = await mkdtemp(path.join(tmpdir(), "agents-manager-desktop-"));
 const vault = path.join(root, "vault");
 const plugin = path.join(vault, ".obsidian", "plugins", "agents-manager");
-const state = path.join(vault, ".obsidian", "agents-manager-sync");
+const state = path.join(plugin, "sync");
 const targets = path.join(root, "targets");
 
 async function write(file, text) {

@@ -2,6 +2,7 @@ var fs = require("fs");
 var path = require("path");
 var os = require("os");
 var crypto = require("crypto");
+const { syncDirectory, readText, replaceText, createHistory } = require("./storage");
 const { normalizeNewlines, extractInstructionBody, parseWorkStructure, rebuildDocument, computeLineDiff, composeMergedBody } = require("./documents");
 
 async function openInstructions(plugin) {
@@ -26,6 +27,15 @@ async function openInstructions(plugin) {
     var REGISTRY_PATH = null;
     var LAYER1_STATE_PATH = null;
     var LAYER2_STATE_PATH = null;
+
+    let history;
+    let refreshHistory = () => {};
+    async function exclusive(action) {
+        if (plugin.syncBusy) throw new Error("正在处理其他同步操作。");
+        plugin.syncBusy = true;
+        try { return await action(); }
+        finally { plugin.syncBusy = false; refreshHistory(); }
+    }
 
     async function displayPanel() {
 
@@ -58,7 +68,7 @@ async function openInstructions(plugin) {
             layer2.error = error && error.message ? error.message : String(error);
         }
 
-        if (layer1.error && layer2.error) {
+        if (layer1.error && layer2.error && !history.latest()) {
             await showMessage(
                 "指令分发失败",
                 "第一级：" + layer1.error + "\n\n第二级：" + layer2.error
@@ -66,7 +76,7 @@ async function openInstructions(plugin) {
             return;
         }
 
-        await showPanel(app, layer1, layer2);
+        return showPanel(app, layer1, layer2);
     };
     function configureStatePaths(app) {
         var adapter = app && app.vault && app.vault.adapter;
@@ -82,8 +92,11 @@ async function openInstructions(plugin) {
 
         VAULT_ROOT = vaultRoot;
         const configDir = path.join(vaultRoot, app.vault.configDir || ".obsidian");
-        const legacy = path.join(configDir, "nascence-sync");
-        STATE_ROOT = fs.existsSync(legacy) ? legacy : path.join(configDir, "agents-manager-sync");
+        const pluginDir = plugin.manifest?.dir
+            ? path.resolve(vaultRoot, plugin.manifest.dir)
+            : path.join(configDir, "plugins", "agents-manager");
+        STATE_ROOT = syncDirectory(configDir, pluginDir);
+        history = createHistory(STATE_ROOT, readChange, writeChange, validateUndo);
         REGISTRY_PATH = path.join(STATE_ROOT, "instruction-projects.json");
         LAYER1_STATE_PATH = path.join(STATE_ROOT, "user-instructions-sync.json");
         LAYER2_STATE_PATH = path.join(STATE_ROOT, "type-instructions-sync.json");
@@ -167,45 +180,54 @@ async function openInstructions(plugin) {
         return String(text).replace(/\n$/, "");
     }
 
-    function backupAndWrite(targetPath, content, backupDirectoryName) {
-        var backupDirectory = path.join(os.tmpdir(), backupDirectoryName);
-        fs.mkdirSync(backupDirectory, { recursive: true });
-
-        var stamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 17);
-        var backupPath = null;
-        if (fs.existsSync(targetPath)) {
-            var backupName = (path.basename(path.dirname(targetPath)) + "-" + path.basename(targetPath))
-                .replace(/[\\/:*?"<>|]/g, "_") + "." + stamp + ".bak";
-            backupPath = path.join(backupDirectory, backupName);
-            fs.copyFileSync(targetPath, backupPath);
+    function validateUndo(entries) {
+        const notes = [LAYER1_SOURCE, TYPE_SOURCES.work.vaultPath, TYPE_SOURCES.code.vaultPath].filter(Boolean);
+        const targets = new Set(LAYER1_TARGETS.map(target => canonicalPath(target.path)));
+        if (entries.some(entry => entry.kind === "target" && !targets.has(canonicalPath(entry.path)))) {
+            for (const project of readRegistry().projects) targets.add(canonicalPath(project.path));
         }
-        fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-        fs.writeFileSync(targetPath, content, "utf8");
-
-        var verified = readExternalText(targetPath);
-        if (verified !== content) {
-            throw new Error("写入后校验失败：" + targetPath);
+        for (const entry of entries) {
+            const allowed = (entry.kind === "note" && notes.includes(entry.path)) ||
+                (entry.kind === "target" && targets.has(canonicalPath(entry.path))) ||
+                (entry.kind === "baseline" && [LAYER1_STATE_PATH, LAYER2_STATE_PATH].includes(entry.path));
+            if (!allowed) throw new Error("此文件已不在当前库的同步范围：" + entry.path);
         }
-        return backupPath;
     }
 
-    // 备份源笔记当前内容（可能含编辑器未落盘修改）到临时目录，供一键回收等
-    // 覆盖源侧的写回动作在丢弃另一侧改动时留退路。
-    function backupVaultText(text, vaultPath, backupDirectoryName) {
-        var backupDirectory = path.join(os.tmpdir(), backupDirectoryName);
-        fs.mkdirSync(backupDirectory, { recursive: true });
-
-        var stamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 17);
-        var backupName = (path.basename(path.dirname(vaultPath)) + "-" + path.basename(vaultPath))
-            .replace(/[\\/:*?"<>|]/g, "_") + "." + stamp + ".bak";
-        var backupPath = path.join(backupDirectory, backupName);
-        fs.writeFileSync(backupPath, text, "utf8");
-        return backupPath;
+    function readChange(entry) {
+        return entry.kind === "note" ? syncReadVault(app, entry.path) : readText(entry.path);
     }
 
-    // ===== 同步通道：两级状态机的差异点 =====
+    async function writeChange(entry, text) {
+        if (entry.kind === "note") await writeVaultFile(app, entry.path, text);
+        else replaceText(entry.path, text);
+        if (readChange(entry) !== text) throw new Error("写入校验失败：" + entry.path);
+    }
 
-    // 用户级通道：源为 用户指令源笔记，整份正文（去 frontmatter）参与同步。
+    function changeSet() {
+        const entries = [];
+        const states = new Map();
+        return {
+            document(kind, file, after) {
+                const entry = { kind, path: file, after };
+                entry.before = readChange(entry);
+                entries.push(entry);
+            },
+            baseline(channel, target, source, destination) {
+                if (!states.has(channel.statePath)) {
+                    states.set(channel.statePath, readChannelState(channel) || channel.newState());
+                }
+                updateSyncEntry(states.get(channel.statePath), channel, target, source, destination);
+            },
+            apply(label) {
+                for (const [file, state] of states) {
+                    this.document("baseline", file, JSON.stringify(state, null, 2) + "\n");
+                }
+                return history.apply(label, entries);
+            },
+        };
+    }
+
     function makeUserChannel() {
         var channel = {
             id: "user",
@@ -217,7 +239,6 @@ async function openInstructions(plugin) {
             stateSourcePath: LAYER1_SOURCE,
             hashFieldSource: "sourceHash",
             hashFieldTarget: "targetHash",
-            backupDirectory: "nascence-user-instructions-sync",
             statePath: null
         };
 
@@ -284,7 +305,7 @@ async function openInstructions(plugin) {
             recordOnly: "目标内容已一致，只需建立同步基线",
             unchanged: "目标内容已与 用户指令源笔记一致，已完成同步。",
             initialReview: "目标文件与 用户指令源笔记不一致；可" + LABEL_BACKUP_AND_OVERWRITE + "、将目标版本回收进 用户指令源笔记，或行级对比合并。",
-            conflictBoth: "目标文件和 用户指令源笔记在上次同步后都被修改过；一键动作保留所选一侧、丢弃另一侧（被覆盖一侧先备份到临时目录），要两边都保留请行级对比合并。",
+            conflictBoth: "目标文件和 用户指令源笔记在上次同步后都被修改过；一键动作保留所选一侧、丢弃另一侧（可撤销上次操作），要两边都保留请行级对比合并。",
             conflictTargetOnly: "目标文件在上次同步后被外部修改，用户指令源笔记未变；可将目标版本一键回收进 用户指令源笔记，或" + LABEL_BACKUP_AND_OVERWRITE + "。",
             sync: "只有 用户指令源笔记发生变化，目标文件未被外部修改。",
             unchangedNoChange: "源和目标都没有变化。",
@@ -296,17 +317,9 @@ async function openInstructions(plugin) {
             changedDuringDialog: "点击后目标文件又发生了变化，已停止覆盖：",
             baselineSaved: "已建立同步基线，未改写文件。",
             createdFromSource: "目标文件不存在，已创建并建立同步基线。",
-            distributed: "已备份并覆盖此文件。\n备份：",
-            distributedNoBackup: "目标文件不存在，已创建并建立同步基线。",
             recycleIdentical: "用户指令源笔记已与目标文件一致，已建立同步基线，未改写任何文件。",
-            recycleBackup: "已备份 用户指令源笔记原文：",
             recycleDone: "已把目标文件正文回收进 用户指令源笔记，同步基线已更新。",
-            recycleDrift: "\n注意：用户指令源笔记在上次同步后也有改动，本次回收未保留笔记侧改动，需要时可从备份恢复。",
             recycleTail: "",
-            mergeSourceWritten: "已写回 用户指令源笔记",
-            mergeSourceUntouched: "用户指令源笔记已是合并结果，未改写。",
-            mergeTargetWritten: function (target) { return "已写回 " + target.name; },
-            mergeTargetUntouchedTail: " 已是合并结果，未改写。",
             mergeDone: "两边已一致，该目标同步基线已更新。",
             mergeUnsavedSource: "两侧内容一致，但 用户指令源笔记在编辑器中还有未保存的修改。\n请先保存源笔记，再重新运行命令刷新判定。",
             mergeIdentical: "两侧内容完全一致，已为该目标建立同步基线。\n重新运行命令后将显示已同步。",
@@ -342,7 +355,6 @@ async function openInstructions(plugin) {
             stateSourcePath: null,
             hashFieldSource: "sourceSectionHash",
             hashFieldTarget: "targetSectionHash",
-            backupDirectory: "nascence-type-instructions-sync",
             statePath: null
         };
 
@@ -411,7 +423,7 @@ async function openInstructions(plugin) {
             recordOnly: "工作规范区块已与模板一致，只需建立同步基线。",
             unchanged: "工作规范区块已与模板一致，已完成同步。",
             initialReview: "首次接入且工作规范与模板存在差异；可将项目版本回收进模板、用模板覆盖项目区块，或行级对比合并。",
-            conflictBoth: "模板和项目工作规范在上次同步后都被修改过；一键动作保留所选一侧、丢弃另一侧（被覆盖一侧先备份到临时目录），要两边都保留请行级对比合并。",
+            conflictBoth: "模板和项目工作规范在上次同步后都被修改过；一键动作保留所选一侧、丢弃另一侧（可撤销上次操作），要两边都保留请行级对比合并。",
             conflictTargetOnly: "项目工作规范在上次同步后被修改，模板与上次分发时一致；可将项目版本一键回收进模板，或用模板覆盖项目区块。",
             sync: "模板已更新，项目工作规范仍是上次分发版本；将备份项目文件后只替换工作规范区块。",
             unchangedNoChange: "源和目标都没有变化。",
@@ -422,17 +434,9 @@ async function openInstructions(plugin) {
             changedDuringDialog: "点击后项目工作规范又发生了变化，已停止覆盖：",
             baselineSaved: "已建立同步基线，未改写项目文件。",
             createdFromSource: "已从 " + definition.name + " 生成完整项目文件，并建立同步基线。",
-            distributed: "已备份并只替换工作规范区块，第三级内容原样保留。\n备份：",
-            distributedNoBackup: "已替换工作规范区块，第三级内容原样保留。",
             recycleIdentical: "模板已与项目工作规范一致，已建立同步基线，未改写任何文件。",
-            recycleBackup: "已备份模板原文：",
             recycleDone: "已把项目工作规范回收进 " + definition.name + "，该项目同步基线已更新。",
-            recycleDrift: "\n注意：模板在上次同步后也有改动，本次回收未保留模板侧改动，需要时可从备份恢复。",
             recycleTail: "\n模板的改进会在下次运行时分发给其他同类型项目。",
-            mergeSourceWritten: "已写回 " + definition.name,
-            mergeSourceUntouched: definition.name + " 已是合并结果，未改写。",
-            mergeTargetWritten: function (target) { return "已写回 " + target.name + " 的工作规范区块，第三级内容原样保留"; },
-            mergeTargetUntouchedTail: " 已是合并结果，未改写。",
             mergeDone: "两边已一致，该项目同步基线已更新；模板的改进会在下次运行时分发给其他同类型项目。",
             mergeUnsavedSource: "两侧内容一致，但模板在编辑器中还有未保存的修改。\n请先保存模板，再重新运行命令刷新判定。",
             mergeIdentical: "两侧内容完全一致，已为该项目建立同步基线。\n重新运行命令后将显示已同步。",
@@ -486,8 +490,7 @@ async function openInstructions(plugin) {
         }) || null;
     }
 
-    function saveSyncEntry(channel, target, sourceText, targetText) {
-        var state = readChannelState(channel) || channel.newState();
+    function updateSyncEntry(state, channel, target, sourceText, targetText) {
         var key = canonicalPath(target.path);
         var now = new Date().toISOString();
         var entry = { path: key };
@@ -507,8 +510,7 @@ async function openInstructions(plugin) {
         state.version = 1;
         if (channel.stateSourcePath) state.sourcePath = channel.stateSourcePath;
         state.updatedAt = now;
-        fs.mkdirSync(STATE_ROOT, { recursive: true });
-        writeState(channel.statePath, state);
+
     }
 
     // ===== 登记表与通道源加载 =====
@@ -697,68 +699,37 @@ async function openInstructions(plugin) {
 
     // 分发（含建立基线与覆盖确认）：目标不存在时从源生成完整文件，
     // 已存在时只替换参与同步的部分，通道外的内容（如第三级）原样保留。
-    function applyChannelAction(channel, target) {
-        var exists = fs.existsSync(target.path) && fs.statSync(target.path).isFile();
-
-        if (target.action === "record-only" || target.action === "unchanged") {
-            if (!exists) {
-                throw new Error(channel.text.baselineNoFile + target.path);
-            }
-            var baselineDocument = channel.readTargetDocument(target.path);
-            if (hashText(baselineDocument.section) !== target.source.sectionHash) {
-                throw new Error(channel.text.baselineChanged + target.path);
-            }
-            saveSyncEntry(channel, target, target.source.section, baselineDocument.section);
-            return channel.text.baselineSaved;
-        }
-
-        if (!exists) {
-            // 首次接入，或冲突状态下文件被删除后的重建：从源生成完整文件。
-            backupAndWrite(target.path, target.source.fullBody, channel.backupDirectory);
-            saveSyncEntry(channel, target, target.source.section, target.source.section);
-            return channel.text.createdFromSource;
-        }
-
-        // 以下动作都针对已存在的目标文件，只替换参与同步的部分。
-        // 普通分发不允许在弹窗打开期间被悄悄改写；覆盖类动作属于用户明确授权。
-        var explicitOverwrite = target.action === "initial-review" || target.action === "conflict";
-        var document = channel.readTargetDocument(target.path);
-        var currentHash = hashText(document.section);
-
-        if (!explicitOverwrite && currentHash !== target.currentHash && currentHash !== target.source.sectionHash) {
+    function planDistribution(changes, target) {
+        const { channel, source } = target;
+        const current = fs.existsSync(target.path) ? channel.readTargetDocument(target.path) : null;
+        if (channel.extractSource(syncReadVault(app, channel.sourceVaultPath)).fullBody !== source.fullBody ||
+            (current ? hashText(current.section) : null) !== target.currentHash) {
             throw new Error(channel.text.changedDuringDialog + target.path);
         }
-
-        var newText = document.composeTargetText(target.source.section);
-        var backupPath = backupAndWrite(target.path, newText, channel.backupDirectory);
-        saveSyncEntry(channel, target, target.source.section, target.source.section);
-        return backupPath
-            ? channel.text.distributed + backupPath
-            : channel.text.distributedNoBackup;
+        if (!current || current.section !== source.section) {
+            changes.document("target", target.path, current ? current.composeTargetText(source.section) : source.fullBody);
+        }
+        changes.baseline(channel, target, source.section, source.section);
     }
 
-    // 回收：把目标当前参与同步的部分整体采纳进源笔记，并更新该目标的同步基线；
-    // 源侧未同步改动先备份到临时目录。
+    async function applyChannelAction(channel, target) {
+        const changes = changeSet();
+        planDistribution(changes, target);
+        await changes.apply("分发到 " + target.name);
+        return target.action === "record-only" ? channel.text.baselineSaved : "已分发到 " + target.name;
+    }
+
     async function applyChannelRecycle(channel, target, app) {
-        var externalDocument = channel.readTargetDocument(target.path);
-        var externalSection = externalDocument.section;
-        var sourceDocument = channel.readSourceDocument(app);
-
-        if (sourceDocument.section === externalSection) {
-            saveSyncEntry(channel, target, externalSection, externalSection);
-            return channel.text.recycleIdentical;
+        const external = channel.readTargetSection(target.path);
+        const source = channel.readSourceDocument(app);
+        const changes = changeSet();
+        if (source.section !== external) {
+            changes.document("note", channel.sourceVaultPath, source.composeSourceText(external));
         }
-
-        var backupPath = backupVaultText(sourceDocument.raw, channel.sourceVaultPath, channel.backupDirectory);
-        await writeVaultFile(app, channel.sourceVaultPath, sourceDocument.composeSourceText(externalSection));
-        var previous = findSyncEntry(channel, readChannelState(channel), target.path);
-        var sourceHadDrift = !!previous && hashText(sourceDocument.section) !== previous[channel.hashFieldSource];
-        var entryText = channel.recycleEntryText(externalSection);
-        saveSyncEntry(channel, target, entryText, entryText);
-        return (backupPath ? channel.text.recycleBackup + backupPath + "\n" : "") +
-            channel.text.recycleDone +
-            (sourceHadDrift ? channel.text.recycleDrift : "") +
-            channel.text.recycleTail;
+        const section = channel.recycleEntryText(external);
+        changes.baseline(channel, target, section, section);
+        await changes.apply("从 " + target.name + " 回收");
+        return channel.text.recycleDone + channel.text.recycleTail;
     }
 
     // ===== 行级对比合并（两级共用） =====
@@ -792,18 +763,10 @@ async function openInstructions(plugin) {
             if (!hasDiff) {
                 // 两侧一致本身就是可信证据：安全条件下直接建立同步基线，
                 // 用户不必再重跑一次命令只为刷新卡片状态。
-                var identicalMessage;
-                try {
-                    identicalMessage = config.onIdentical
-                        ? config.onIdentical()
-                        : "两侧内容完全一致，无需合并。";
-                } catch (error) {
-                    identicalMessage = "两侧内容一致，但更新同步状态时失败：" +
-                        (error.message || String(error));
-                }
-                showMessage("没有差异", identicalMessage).then(function () {
-                    resolve("noop");
-                });
+                Promise.resolve().then(() => config.onIdentical()).then(
+                    message => showMessage("没有差异", message),
+                    error => showMessage("没有差异", "更新同步状态失败：" + error.message)
+                ).then(() => resolve("noop"));
                 return;
             }
 
@@ -938,12 +901,16 @@ async function openInstructions(plugin) {
             getRight: function () {
                 return channel.readTargetSection(target.path);
             },
-            onIdentical: function () {
+            onIdentical: async function () {
                 var diskSection = channel.readSourceSectionFromDisk();
                 if (diskSection !== sourceSectionNow) {
                     return channel.text.mergeUnsavedSource;
                 }
-                saveSyncEntry(channel, target, diskSection, diskSection);
+                await exclusive(async () => {
+                    const changes = changeSet();
+                    changes.baseline(channel, target, diskSection, diskSection);
+                    await changes.apply("建立同步基线 " + target.name);
+                });
                 return channel.text.mergeIdentical;
             },
             applyLabel: channel.text.mergeApplyLabel,
@@ -954,28 +921,18 @@ async function openInstructions(plugin) {
                 var sourceDocument = channel.readSourceDocument(app);
                 var targetDocument = channel.readTargetDocument(target.path);
 
-                var messages = [];
-                if (sourceDocument.section !== normalized) {
-                    var sourceBackup = backupVaultText(sourceDocument.raw, channel.sourceVaultPath, channel.backupDirectory);
-                    await writeVaultFile(app, channel.sourceVaultPath, sourceDocument.composeSourceText(normalized));
-                    messages.push(channel.text.mergeSourceWritten + "（原文备份：" + sourceBackup + "）。");
-                } else {
-                    messages.push(channel.text.mergeSourceUntouched);
-                }
-                if (targetDocument.section !== normalized) {
-                    var targetBackup = backupAndWrite(
-                        target.path,
-                        targetDocument.composeTargetText(normalized),
-                        channel.backupDirectory
-                    );
-                    messages.push(channel.text.mergeTargetWritten(target) + "（原文备份：" + targetBackup + "）。");
-                } else {
-                    messages.push(target.name + channel.text.mergeTargetUntouchedTail);
-                }
-
-                saveSyncEntry(channel, target, normalized, normalized);
-                messages.push(channel.text.mergeDone);
-                return messages.join("\n");
+                return exclusive(async () => {
+                    const changes = changeSet();
+                    if (sourceDocument.section !== normalized) {
+                        changes.document("note", channel.sourceVaultPath, sourceDocument.composeSourceText(normalized));
+                    }
+                    if (targetDocument.section !== normalized) {
+                        changes.document("target", target.path, targetDocument.composeTargetText(normalized));
+                    }
+                    changes.baseline(channel, target, normalized, normalized);
+                    await changes.apply("合并 " + target.name);
+                    return channel.text.mergeDone;
+                });
             }
         };
     }
@@ -1130,6 +1087,7 @@ async function openInstructions(plugin) {
     // 先读后写：登记表或状态文件读取失败时整体不执行，避免登记已删而基线残留。
     function unregisterProject(target) {
         var key = canonicalPath(target.path);
+        if (plugin.syncBusy) throw new Error("请等待当前同步操作完成。");
         var registry = readRegistry();
         var registryIndex = registry.projects.findIndex(function (project) {
             return canonicalPath(project.path) === key;
@@ -1308,6 +1266,44 @@ async function openInstructions(plugin) {
         content.appendChild(row);
     }
 
+    async function batchPlan() {
+        const registry = readRegistry();
+        const loaded = await loadTypeSources(app, registry);
+        const targets = buildTypePlans(registry.projects, loaded.sources, loaded.errors).targets;
+        if (LAYER1_TARGETS.length) {
+            const source = USER_CHANNEL.extractSource(syncReadVault(app, LAYER1_SOURCE));
+            targets.push(...buildChannelPlan(USER_CHANNEL, LAYER1_TARGETS, source, null, readChannelState(USER_CHANNEL)).targets);
+        }
+        const sources = new Set(targets.map(t => canonicalPath(path.join(VAULT_ROOT, t.channel.sourceVaultPath))));
+        const seen = new Set();
+        for (const target of targets) {
+            if (target.action === "invalid") throw new Error(target.name + "：" + target.reason);
+            const key = canonicalPath(target.path);
+            if (sources.has(key)) throw new Error("指令源同时被登记为分发目标：" + target.path);
+            if (seen.has(key)) throw new Error("多个目标指向同一文件：" + target.path);
+            seen.add(key);
+        }
+        return targets.filter(target => target.action !== "unchanged");
+    }
+
+    async function distributeAll() {
+        const targets = await batchPlan();
+        if (!targets.length) { await showMessage("一键分发", "所有目标均已同步。"); return false; }
+        const users = targets.filter(target => target.channel.id === "user").length;
+        const conflicts = targets.filter(target => ["conflict", "initial-review"].includes(target.action));
+        const summary = "本次处理 " + users + " 个用户级目标和 " + (targets.length - users) + " 个项目。" +
+            "\n其中 " + conflicts.length + " 个目标有本地改动或首次比对存在差异，确认后使用源版本。" +
+            (conflicts.length ? "\n" + conflicts.map(target => target.name).join("、") : "");
+        if (!await showConfirm("一键分发", summary, "确认分发")) return false;
+        const fresh = await batchPlan();
+        const signature = list => JSON.stringify(list.map(t => [t.channel.id, t.path, t.currentHash, t.action, t.source.fullBody]));
+        if (signature(fresh) !== signature(targets)) throw new Error("待分发内容已变化，请重新确认。");
+        const changes = changeSet();
+        for (const target of fresh) planDistribution(changes, target);
+        await changes.apply("一键分发（" + fresh.length + " 个目标）");
+        return true;
+    }
+
     function showPanel(app, layer1, layer2) {
         return new Promise(function (resolve) {
             var modal = createModal({
@@ -1319,7 +1315,7 @@ async function openInstructions(plugin) {
 
             content.appendChild(el("div",
                 "margin-bottom:14px;line-height:1.6;color:var(--text-muted);",
-                "每个目标单独处理；检测到冲突时不会自动覆盖。第一级分发整份正文；" +
+                "可逐个处理，也可一键分发全部目标。第一级分发整份正文；" +
                 "第二级只同步第 1 个「# 」一级标题到第 2 个之间的区块，第 2 个一级标题及其后内容永不改动。"));
 
             // ===== 标签栏：第一级与第二级的 Work／Code 各占一个标签页 =====
@@ -1396,7 +1392,7 @@ async function openInstructions(plugin) {
             var wrapRun = function (key, target, apply) {
                 return async function () {
                     var wasPending = target.action !== "unchanged";
-                    var result = await apply();
+                    var result = await exclusive(apply);
                     target.action = "unchanged";
                     settlePending(key, wasPending);
                     return result;
@@ -1475,6 +1471,32 @@ async function openInstructions(plugin) {
             }
             activateTab(defaultKey);
 
+            const undo = el("button", null, "撤销上次操作");
+            const last = el("span", "margin-right:auto;align-self:center;");
+            const reload = () => { resolve(true); modal.close(); };
+            refreshHistory = () => {
+                const operation = history.latest();
+                last.textContent = operation ? "上次操作：" + operation.label : "";
+                undo.disabled = !operation;
+            };
+            refreshHistory();
+            undo.onclick = async () => {
+                try {
+                    const restored = await exclusive(() => history.undo(files => showConfirm(
+                        "撤销上次操作", "以下文件在操作后又有修改。继续撤销会覆盖这些修改：\n" + files.join("\n"), "继续撤销"
+                    )));
+                    if (restored) reload();
+                } catch (error) { showMessage("撤销失败", error.message); }
+            };
+            const bulk = el("button", null, "一键分发");
+            bulk.onclick = async () => {
+                try {
+                    if (await exclusive(distributeAll)) reload();
+                } catch (error) { showMessage("分发失败", error.message); }
+            };
+            modal.footer.appendChild(last);
+            modal.footer.appendChild(undo);
+            modal.footer.appendChild(bulk);
             var closeButton = el("button", null, "关闭");
             closeButton.className = "mod-cta";
             closeButton.onclick = function () { modal.close(); };
@@ -1524,7 +1546,7 @@ async function openInstructions(plugin) {
         });
     }
 
-    await displayPanel();
+    while (await displayPanel()) { /* Rebuild plans after a batch or undo. */ }
 }
 
 module.exports = { openInstructions };
