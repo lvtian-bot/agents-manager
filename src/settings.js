@@ -13,11 +13,14 @@ const legacySources = {
     workSource: "8-永久笔记/人工智能/37.1-Work项目指令模板.md",
     codeSource: "8-永久笔记/人工智能/37.2-Code项目指令模板.md",
 };
-function loadSettings(app, data) {
+function loadSettings(app, data, pluginDir) {
     const saved = data || {};
     const adapter = app.vault?.adapter;
     const root = adapter?.getBasePath?.() || adapter?.basePath;
-    const existing = root && fs.existsSync(path.join(root, app.vault.configDir || ".obsidian", "nascence-sync"));
+    const config = root && path.join(root, app.vault.configDir || ".obsidian");
+    const installed = config && (pluginDir ? path.resolve(root, pluginDir) : path.join(config, "plugins", "agents-manager"));
+    const existing = config && (fs.existsSync(path.join(config, "nascence-sync")) ||
+        fs.existsSync(path.join(installed, "sync", "legacy-settings")));
     const hasRules = Object.keys(saved.templates || {}).length > 0;
     return {
         endpoint: "", model: "", credentialVariable: "",

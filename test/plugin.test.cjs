@@ -129,6 +129,7 @@ async function loadPlugin(app, options = {}) {
                     onClose() {}
                 } };
             }
+            if (name === "fs" && options.filesystem) return options.filesystem;
             if (name === "os") {
                 assert.ok(options.fixtureDir, "同步测试须配置隔离目录");
                 return {
@@ -442,7 +443,9 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
     };
     const read = (file) => fs.readFileSync(file, "utf8");
     const hash = (value) => createHash("sha256").update(value, "utf8").digest("hex");
-    const typeStatePath = path.join(stateFolder, "type-instructions-sync.json");
+    const newFolder = path.join(vaultRoot, ".obsidian", "plugins", "agents-manager", "sync");
+    const typeStatePath = path.join(newFolder, "type-instructions-sync.json");
+    const legacyTypeState = path.join(stateFolder, "type-instructions-sync.json");
     const oldSection = "# 工作规范\n旧版本";
     const newSection = "# 工作规范\n新版本";
     const projectBody = "# 项目专属\n保留这行。\n";
@@ -459,7 +462,7 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
         version: 1,
         targets: [{ path: userTarget, sourceHash: hash(userBody), targetHash: hash(userBody) }],
     }));
-    write(typeStatePath, JSON.stringify({
+    write(legacyTypeState, JSON.stringify({
         version: 1,
         projects: [{
             name: "样例项目",
@@ -473,6 +476,14 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
     write(userTarget, userBody);
 
     let failSourceWrite = false;
+    let failTargetWrite = false;
+    const filesystem = {
+        ...fs,
+        renameSync(from, to) {
+            if (failTargetWrite && to === target) throw new Error("模拟合并第二侧写入失败");
+            return fs.renameSync(from, to);
+        },
+    };
     const plugin = await loadPlugin({
         workspace: {
             getActiveFile: () => null,
@@ -486,7 +497,7 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
                 await fs.promises.writeFile(path.join(vaultRoot, file.path), text);
             },
         },
-    }, { fixtureDir });
+    }, { fixtureDir, filesystem });
 
     const panel = plugin.invoke("sync-instructions");
     await new Promise((resolve) => setImmediate(resolve));
@@ -502,9 +513,10 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
     assert.equal(read(userTarget), userBody);
     assert.equal(JSON.parse(read(typeStatePath)).projects[0].targetSectionHash, hash(newSection));
 
-    const backupDir = path.join(fixtureDir, "backups", "nascence-type-instructions-sync");
-    const [backup] = fs.readdirSync(backupDir);
-    assert.equal(read(path.join(backupDir, backup)), previousProject);
+    const journal = path.join(newFolder, "last-operation.json");
+    assert.equal(JSON.parse(read(journal)).entries.find(e => e.path === target).before, previousProject);
+    assert.equal(read(path.join(newFolder, "instruction-projects.json")), registry);
+    assert.equal(JSON.parse(read(legacyTypeState)).projects[0].targetSectionHash, hash(oldSection));
 
     const [close] = findElements(plugin.body, (element) => element.textContent === "关闭");
     close.onclick();
@@ -526,6 +538,13 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
     const checkboxes = findElements(plugin.body, node => node.type === "checkbox");
     assert.equal(checkboxes.length, 2);
     for (const box of checkboxes) { box.checked = true; box.onchange(); }
+    const beforeMerge = [read(typeSource), read(target), read(typeStatePath)];
+    failTargetWrite = true;
+    await button("写回模板与项目").onclick();
+    assert.deepEqual([read(typeSource), read(target), read(typeStatePath)], beforeMerge);
+    assert.equal(JSON.parse(read(journal)).label, "分发到 样例项目");
+    findElements(plugin.body, node => node.textContent === "关闭").at(-1).onclick();
+    failTargetWrite = false;
     await button("写回模板与项目").onclick();
     assert.match(read(target), /源端新增/);
     assert.match(read(target), /目标新增/);
@@ -534,6 +553,15 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
     for (const item of findElements(plugin.body, node => node.textContent === "关闭").reverse()) item.onclick();
     await conflict;
 
+    const merged = [read(typeSource), read(target)];
+    const mergeUndo = plugin.invoke("sync-instructions");
+    await tick();
+    await button("撤销上次操作").onclick();
+    await tick();
+    assert.deepEqual([read(typeSource), read(target), read(typeStatePath)], beforeMerge);
+    button("关闭").onclick();
+    await mergeUndo;
+    write(typeSource, merged[0]);
     write(target, "# 工作规范\n来自目标的更新\n" + projectBody);
     const recycle = plugin.invoke("sync-instructions");
     await tick();
@@ -547,11 +575,71 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
     assert.equal(read(target), targetBeforeFailure);
     assert.equal(read(typeStatePath), baselineBeforeFailure);
     assert.equal(recover.disabled, false);
-    assert.ok(fs.readdirSync(backupDir).some(name => read(path.join(backupDir, name)) === sourceBeforeFailure));
+    assert.equal(fs.existsSync(journal), false);
     failSourceWrite = false;
     await recover.onclick();
     assert.equal(read(typeSource), sourceHeader + "# 工作规范\n来自目标的更新\n" + sourceTail);
     button("关闭").onclick();
     await recycle;
     assert.equal(plugin.body.children.length, 0);
+
+    // The undo slot survives closing the panel and refuses to silently overwrite later edits.
+    const reopened = plugin.invoke("sync-instructions");
+    await tick();
+    const modified = read(typeSource) + "后续编辑\n";
+    write(typeSource, modified);
+    const cancelled = button("撤销上次操作").onclick();
+    await tick();
+    button("取消").onclick();
+    await cancelled;
+    assert.equal(read(typeSource), modified);
+    const confirmed = button("撤销上次操作").onclick();
+    await tick();
+    button("继续撤销").onclick();
+    await confirmed;
+    await tick();
+    assert.equal(read(typeSource), sourceBeforeFailure);
+    assert.equal(read(typeStatePath), baselineBeforeFailure);
+    assert.equal(button("撤销上次操作").disabled, true);
+    button("关闭").onclick();
+    await reopened;
+
+    // One preview and one undo for an existing Work project, a new Code project and user targets.
+    const codeTarget = path.join(fixtureDir, "code-project", "AGENTS.md");
+    const codeSource = "# Code 规范\n代码规则\n# 项目模板\n代码示例\n";
+    write(path.join(noteFolder, "37.2-Code项目指令模板.md"), codeSource);
+    const updated = JSON.parse(registry);
+    updated.projects.push({ name: "Code 样例", type: "code", path: codeTarget });
+    write(path.join(newFolder, "instruction-projects.json"), JSON.stringify(updated));
+    write(userTarget, "本地用户指令\n");
+    const previousBaseline = read(typeStatePath);
+    const previousTarget = read(target);
+
+    const bulkPanel = plugin.invoke("sync-instructions");
+    await tick();
+    const cancelBatch = button("一键分发").onclick();
+    await tick();
+    button("取消").onclick();
+    await cancelBatch;
+    assert.equal(read(target), previousTarget);
+    assert.equal(fs.existsSync(codeTarget), false);
+    const batch = button("一键分发").onclick();
+    await tick();
+    button("确认分发").onclick();
+    await batch;
+    await tick();
+    assert.equal(read(codeTarget), codeSource);
+    assert.equal(read(userTarget), userBody);
+    assert.ok(read(target).endsWith(projectBody));
+    assert.notEqual(read(target), previousTarget);
+    assert.match(JSON.parse(read(journal)).label, /一键分发/);
+    await button("撤销上次操作").onclick();
+    await tick();
+    assert.equal(read(target), previousTarget);
+    assert.equal(read(userTarget), "本地用户指令\n");
+    assert.equal(fs.existsSync(codeTarget), false);
+    assert.equal(read(typeStatePath), previousBaseline);
+    assert.equal(button("撤销上次操作").disabled, true);
+    button("关闭").onclick();
+    await bulkPanel;
 });

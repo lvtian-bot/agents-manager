@@ -4,7 +4,7 @@ const { editWithAI } = require("./notes");
 
 module.exports = class AgentsManager extends Plugin {
     async onload() {
-        this.settings = loadSettings(this.app, await this.loadData());
+        this.settings = loadSettings(this.app, await this.loadData(), this.manifest?.dir);
         this.modals = new Set();
         this.addSettingTab(new ManagerSettings(this));
         this.addCommand({
