@@ -2,6 +2,7 @@ var fs = require("fs");
 var path = require("path");
 var os = require("os");
 var crypto = require("crypto");
+const { Notice } = require("obsidian");
 const { syncDirectory, readText, replaceText, createHistory } = require("./storage");
 const { normalizeNewlines, extractInstructionBody, parseWorkStructure, rebuildDocument, computeLineDiff, composeMergedBody } = require("./documents");
 
@@ -37,16 +38,7 @@ async function openInstructions(plugin) {
         finally { plugin.syncBusy = false; refreshHistory(); }
     }
 
-    async function displayPanel() {
-
-        try {
-            configureStatePaths(app);
-        } catch (error) {
-            console.error("[sync-instructions]", error);
-            await showMessage("指令分发失败", error && error.message ? error.message : String(error));
-            return;
-        }
-
+    async function loadPlans() {
         // 两级独立准备：一级出错不阻塞另一级。
         var layer1 = { error: null, plan: null };
         var layer2 = { error: null, plan: null };
@@ -68,16 +60,8 @@ async function openInstructions(plugin) {
             layer2.error = error && error.message ? error.message : String(error);
         }
 
-        if (layer1.error && layer2.error && !history.latest()) {
-            await showMessage(
-                "指令分发失败",
-                "第一级：" + layer1.error + "\n\n第二级：" + layer2.error
-            );
-            return;
-        }
-
-        return showPanel(app, layer1, layer2);
-    };
+        return { layer1, layer2 };
+    }
     function configureStatePaths(app) {
         var adapter = app && app.vault && app.vault.adapter;
         var vaultRoot = null;
@@ -321,8 +305,8 @@ async function openInstructions(plugin) {
             recycleDone: "已把目标文件正文回收进 用户指令源笔记，同步基线已更新。",
             recycleTail: "",
             mergeDone: "两边已一致，该目标同步基线已更新。",
-            mergeUnsavedSource: "两侧内容一致，但 用户指令源笔记在编辑器中还有未保存的修改。\n请先保存源笔记，再重新运行命令刷新判定。",
-            mergeIdentical: "两侧内容完全一致，已为该目标建立同步基线。\n重新运行命令后将显示已同步。",
+            mergeUnsavedSource: "两侧内容一致，但 用户指令源笔记在编辑器中还有未保存的修改。\n请先保存源笔记，再点击面板底部的「刷新」。",
+            mergeIdentical: "两侧内容完全一致，已为该目标建立同步基线。",
             mergeTitle: function (target) { return "行级合并：" + target.name + " ← 用户指令源笔记"; },
             mergeHelp: "勾=保留该行，不勾=移除。红行=仅 用户指令源笔记有（默认不保留），绿行=仅目标文件有（默认保留）。" +
                 "默认合并结果即目标文件当前正文；勾选红行可把笔记侧多出的内容并入。" +
@@ -436,10 +420,10 @@ async function openInstructions(plugin) {
             createdFromSource: "已从 " + definition.name + " 生成完整项目文件，并建立同步基线。",
             recycleIdentical: "模板已与项目工作规范一致，已建立同步基线，未改写任何文件。",
             recycleDone: "已把项目工作规范回收进 " + definition.name + "，该项目同步基线已更新。",
-            recycleTail: "\n模板的改进会在下次运行时分发给其他同类型项目。",
-            mergeDone: "两边已一致，该项目同步基线已更新；模板的改进会在下次运行时分发给其他同类型项目。",
-            mergeUnsavedSource: "两侧内容一致，但模板在编辑器中还有未保存的修改。\n请先保存模板，再重新运行命令刷新判定。",
-            mergeIdentical: "两侧内容完全一致，已为该项目建立同步基线。\n重新运行命令后将显示已同步。",
+            recycleTail: "\n现在可直接分发给其他同类型项目。",
+            mergeDone: "两边已一致，该项目同步基线已更新；现在可直接分发给其他同类型项目。",
+            mergeUnsavedSource: "两侧内容一致，但模板在编辑器中还有未保存的修改。\n请先保存模板，再点击面板底部的「刷新」。",
+            mergeIdentical: "两侧内容完全一致，已为该项目建立同步基线。",
             mergeTitle: function (target) { return "行级合并：" + target.name + " 工作规范 ← " + definition.name; },
             mergeHelp: "勾=保留该行，不勾=移除。红行=仅模板有（默认不保留），绿行=仅项目有（默认保留）。" +
                 "默认合并结果即项目当前版本；勾选红行可把模板侧多出的内容并入。" +
@@ -955,7 +939,7 @@ async function openInstructions(plugin) {
 
     // 单个通道的目标卡片：按钮组装两级共用，差异（按钮文字）来自通道配置。
     // unregister 由面板提供（第二级专用）：移除登记后清待处理计数；第一级不传。
-    function appendChannelTargets(pane, targets, key, app, wrapRun, unregister) {
+    function appendChannelTargets(pane, targets, key, app, wrapRun, unregister, onChanged) {
         targets.forEach(function (target) {
             var buttons = [];
             var fileExists = fs.existsSync(target.path);
@@ -967,23 +951,28 @@ async function openInstructions(plugin) {
             var recycle = wrapRun(key, target, function () {
                 return applyChannelRecycle(channel, target, app);
             });
+            var afterSuccess = function (message) {
+                new Notice(message);
+                return onChanged ? onChanged() : undefined;
+            };
             var canMerge = ["conflict", "initial-review"].indexOf(target.action) >= 0 && fileExists;
             var openMerge = canMerge ? function () {
                 return showMergeModal(buildChannelMergeConfig(channel, target, app));
             } : null;
+            var afterMerge = onChanged ? function () { return onChanged(); } : null;
 
             if (target.action === "unchanged") {
                 buttons.push({ label: "已同步", disabled: true });
             } else if (target.action === "sync") {
-                buttons.push({ label: "备份并分发", primary: true, run: distribute });
+                buttons.push({ label: "备份并分发", primary: true, run: distribute, afterSuccess: afterSuccess });
             } else if (target.action === "initial-create") {
-                buttons.push({ label: labels.initialCreateButton, primary: true, run: distribute });
+                buttons.push({ label: labels.initialCreateButton, primary: true, run: distribute, afterSuccess: afterSuccess });
             } else if (target.action === "record-only") {
-                buttons.push({ label: "建立同步基线", primary: true, run: distribute });
+                buttons.push({ label: "建立同步基线", primary: true, run: distribute, afterSuccess: afterSuccess });
             } else if (target.action === "initial-review") {
-                buttons.push({ label: labels.reviewDistribute, primary: true, run: distribute });
-                buttons.push({ label: labels.recycle, run: recycle });
-                buttons.push({ label: "行级对比合并…", openMerge: openMerge });
+                buttons.push({ label: labels.reviewDistribute, primary: true, run: distribute, afterSuccess: afterSuccess });
+                buttons.push({ label: labels.recycle, run: recycle, afterSuccess: afterSuccess });
+                buttons.push({ label: "行级对比合并…", openMerge: openMerge, afterMerge: afterMerge });
             } else if (target.action === "conflict") {
                 buttons = buildConflictButtons({
                     fileExists: fileExists,
@@ -993,6 +982,10 @@ async function openInstructions(plugin) {
                     overwriteLabel: fileExists ? labels.overwriteExisting : labels.overwriteMissing,
                     overwriteRun: distribute,
                     openMerge: openMerge
+                }).map(function (btn) {
+                    if (btn.openMerge) btn.afterMerge = afterMerge;
+                    else if (btn.run) btn.afterSuccess = afterSuccess;
+                    return btn;
                 });
             }
 
@@ -1227,14 +1220,15 @@ async function openInstructions(plugin) {
             if (entry.openMerge) {
                 button.onclick = function () {
                     button.disabled = true;
-                    entry.openMerge().then(function (result) {
-                        // 合并已写回两侧，本卡片一键动作基于的旧内容全部失效。
-                        if (result === "applied") {
+                    entry.openMerge().then(async function (result) {
+                        // 合并已写回两侧或建立基线，本卡片一键动作基于的旧内容全部失效。
+                        if (result === "applied" || result === "noop") {
                             runButtons.forEach(function (other) {
                                 other.disabled = true;
                             });
+                            if (entry.afterMerge) await entry.afterMerge(result);
                         }
-                        button.disabled = result === "applied";
+                        button.disabled = result === "applied" || result === "noop";
                     });
                 };
             } else if (!entry.disabled) {
@@ -1242,13 +1236,15 @@ async function openInstructions(plugin) {
                     button.disabled = true;
                     status.textContent = "正在处理……";
                     try {
-                        status.textContent = await entry.run();
+                        var resultMessage = await entry.run();
+                        status.textContent = resultMessage;
                         button.textContent = "已完成";
                         button.className = "";
                         // 一个动作成功后卡片状态已改变，其余一键动作基于的是过期内容，全部停用。
                         runButtons.forEach(function (other) {
                             other.disabled = true;
                         });
+                        if (entry.afterSuccess) await entry.afterSuccess(resultMessage);
                     } catch (error) {
                         status.textContent = "未完成：" + (error.message || String(error));
                         button.disabled = false;
@@ -1304,11 +1300,19 @@ async function openInstructions(plugin) {
         return true;
     }
 
-    function showPanel(app, layer1, layer2) {
+    function showPanel(app, initialLayer1, initialLayer2) {
         return new Promise(function (resolve) {
+            var closed = false;
+            var activeKey = null;
+            var area = null;
+            var renderToken = 0;
+
             var modal = createModal({
                 title: "分发与回收指令", width: 880, widthVw: 95, maxHeight: 88,
-                onClose: resolve
+                onClose: function () {
+                    closed = true;
+                    resolve();
+                }
             });
             var content = modal.body;
             content.style.cssText = "padding:16px 18px;overflow:auto;";
@@ -1318,44 +1322,6 @@ async function openInstructions(plugin) {
                 "可逐个处理，也可一键分发全部目标。第一级分发整份正文；" +
                 "第二级只同步第 1 个「# 」一级标题到第 2 个之间的区块，第 2 个一级标题及其后内容永不改动。"));
 
-            // ===== 标签栏：第一级与第二级的 Work／Code 各占一个标签页 =====
-            // 待处理数 = 需要用户动手的目标数（unchanged 以外的动作）；整级不可用时记 1。
-            var paneDefs = [];
-            var layer1Pending = 0;
-            if (layer1.error) {
-                layer1Pending = 1;
-            } else {
-                layer1.plan.targets.forEach(function (target) {
-                    if (target.action !== "unchanged") layer1Pending += 1;
-                });
-            }
-            paneDefs.push({ key: "layer1", label: "第一级：用户级指令", pending: layer1Pending });
-
-            if (layer2.error) {
-                paneDefs.push({ key: "layer2", label: "第二级：类型指令", pending: 1 });
-            } else {
-                ["work", "code"].forEach(function (typeKey) {
-                    var targets = layer2.plan.targets.filter(function (target) {
-                        return target.type === typeKey;
-                    });
-                    var pending = 0;
-                    targets.forEach(function (target) {
-                        if (target.action !== "unchanged") pending += 1;
-                    });
-                    paneDefs.push({
-                        key: "type-" + typeKey,
-                        label: "第二级：" + (typeKey === "work" ? "Work" : "Code") + " 类型",
-                        pending: pending,
-                        type: typeKey,
-                        targets: targets
-                    });
-                });
-                // 登记表为空时没有可拆的类型，回落为单个第二级标签页。
-                if (paneDefs.length === 1) {
-                    paneDefs.push({ key: "layer2", label: "第二级：类型指令", pending: 0 });
-                }
-            }
-
             var TAB_BASE_STYLE =
                 "flex:1;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;box-shadow:none;" +
                 "background:transparent;border:1px solid transparent;color:var(--text-muted);";
@@ -1364,137 +1330,217 @@ async function openInstructions(plugin) {
                 "background:var(--background-secondary);border:1px solid var(--background-modifier-border);" +
                 "color:var(--text-normal);font-weight:600;";
 
-            var tabBar = el("div", "display:flex;gap:8px;margin-bottom:12px;");
-            var tabs = {};
-            var panes = {};
+            async function refreshPanel() {
+                var token = ++renderToken;
+                var next = await loadPlans();
+                if (closed || token !== renderToken) return;
+                render(next.layer1, next.layer2);
+                refreshHistory();
+            }
 
-            var refreshTabLabels = function () {
-                paneDefs.forEach(function (def) {
-                    tabs[def.key].textContent = def.label +
-                        (def.pending > 0 ? "（" + def.pending + " 待处理）" : "");
-                });
-            };
-            var activateTab = function (key) {
-                paneDefs.forEach(function (def) {
-                    tabs[def.key].style.cssText = def.key === key ? TAB_ACTIVE_STYLE : TAB_BASE_STYLE;
-                    panes[def.key].style.display = def.key === key ? "" : "none";
-                });
-            };
-            var settlePending = function (key, wasPending) {
-                if (!wasPending) return;
-                paneDefs.forEach(function (def) {
-                    if (def.key === key) def.pending = Math.max(0, def.pending - 1);
-                });
-                refreshTabLabels();
-            };
+            async function safeRefresh() {
+                try {
+                    await refreshPanel();
+                } catch (error) {
+                    if (!closed) await showMessage("刷新失败", error && error.message ? error.message : String(error));
+                }
+            }
 
-            // 一键动作的统一收尾：成功执行后刷新待处理计数。
-            var wrapRun = function (key, target, apply) {
-                return async function () {
+            function render(layer1, layer2) {
+                var prevScroll = content.scrollTop || 0;
+                var nextArea = el("div");
+
+                // ===== 标签栏：第一级与第二级的 Work／Code 各占一个标签页 =====
+                // 待处理数 = 需要用户动手的目标数（unchanged 以外的动作）；整级不可用时记 1。
+                var paneDefs = [];
+                var layer1Pending = 0;
+                if (layer1.error) {
+                    layer1Pending = 1;
+                } else {
+                    layer1.plan.targets.forEach(function (target) {
+                        if (target.action !== "unchanged") layer1Pending += 1;
+                    });
+                }
+                paneDefs.push({ key: "layer1", label: "第一级：用户级指令", pending: layer1Pending });
+
+                if (layer2.error) {
+                    paneDefs.push({ key: "layer2", label: "第二级：类型指令", pending: 1 });
+                } else {
+                    ["work", "code"].forEach(function (typeKey) {
+                        var targets = layer2.plan.targets.filter(function (target) {
+                            return target.type === typeKey;
+                        });
+                        var pending = 0;
+                        targets.forEach(function (target) {
+                            if (target.action !== "unchanged") pending += 1;
+                        });
+                        paneDefs.push({
+                            key: "type-" + typeKey,
+                            label: "第二级：" + (typeKey === "work" ? "Work" : "Code") + " 类型",
+                            pending: pending,
+                            type: typeKey,
+                            targets: targets
+                        });
+                    });
+                    // 登记表为空时没有可拆的类型，回落为单个第二级标签页。
+                    if (paneDefs.length === 1) {
+                        paneDefs.push({ key: "layer2", label: "第二级：类型指令", pending: 0 });
+                    }
+                }
+
+                var tabBar = el("div", "display:flex;gap:8px;margin-bottom:12px;");
+                var tabs = {};
+                var panes = {};
+
+                var refreshTabLabels = function () {
+                    paneDefs.forEach(function (def) {
+                        tabs[def.key].textContent = def.label +
+                            (def.pending > 0 ? "（" + def.pending + " 待处理）" : "");
+                    });
+                };
+                var activateTab = function (key) {
+                    activeKey = key;
+                    paneDefs.forEach(function (def) {
+                        tabs[def.key].style.cssText = def.key === key ? TAB_ACTIVE_STYLE : TAB_BASE_STYLE;
+                        panes[def.key].style.display = def.key === key ? "" : "none";
+                    });
+                };
+                var settlePending = function (key, wasPending) {
+                    if (!wasPending) return;
+                    paneDefs.forEach(function (def) {
+                        if (def.key === key) def.pending = Math.max(0, def.pending - 1);
+                    });
+                    refreshTabLabels();
+                };
+
+                // 一键动作的统一收尾：成功执行后刷新待处理计数。
+                var wrapRun = function (key, target, apply) {
+                    return async function () {
+                        var wasPending = target.action !== "unchanged";
+                        var result = await exclusive(apply);
+                        target.action = "unchanged";
+                        settlePending(key, wasPending);
+                        return result;
+                    };
+                };
+
+                // 移除登记的收尾：卡片已随动作消失，这里只清待处理计数。
+                var wrapUnregister = function (key, target) {
                     var wasPending = target.action !== "unchanged";
-                    var result = await exclusive(apply);
                     target.action = "unchanged";
                     settlePending(key, wasPending);
-                    return result;
                 };
-            };
 
-            // 移除登记的收尾：卡片已随动作消失，这里只清待处理计数。
-            var wrapUnregister = function (key, target) {
-                var wasPending = target.action !== "unchanged";
-                target.action = "unchanged";
-                settlePending(key, wasPending);
-            };
-
-            content.appendChild(tabBar);
-            paneDefs.forEach(function (def) {
-                tabs[def.key] = document.createElement("button");
-                panes[def.key] = document.createElement("div");
-                tabs[def.key].onclick = function () { activateTab(def.key); };
-                tabBar.appendChild(tabs[def.key]);
-                content.appendChild(panes[def.key]);
-            });
-            refreshTabLabels();
-
-            // ===== 第一级区块 =====
-            appendSectionHeader(panes.layer1, "第一级：用户级指令", "源：" + LAYER1_SOURCE + "　状态：" + LAYER1_STATE_PATH);
-            if (layer1.error) {
-                appendCard(panes.layer1, {
-                    title: "第一级不可用",
-                    pathText: LAYER1_SOURCE,
-                    reason: layer1.error
+                nextArea.appendChild(tabBar);
+                paneDefs.forEach(function (def) {
+                    tabs[def.key] = document.createElement("button");
+                    panes[def.key] = document.createElement("div");
+                    tabs[def.key].onclick = function () { activateTab(def.key); };
+                    tabBar.appendChild(tabs[def.key]);
+                    nextArea.appendChild(panes[def.key]);
                 });
-            } else {
-                appendChannelTargets(panes.layer1, layer1.plan.targets, "layer1", app, wrapRun);
-            }
+                refreshTabLabels();
 
-            // ===== 第二级区块：按类型分标签页 =====
-            paneDefs.slice(1).forEach(function (def) {
-                if (def.key === "layer2") {
-                    appendSectionHeader(panes.layer2, "第二级：类型指令（工作规范区块）", "登记表：" + REGISTRY_PATH);
-                    if (layer2.error) {
-                        appendCard(panes.layer2, {
-                            title: "第二级不可用",
-                            pathText: REGISTRY_PATH,
-                            reason: layer2.error
-                        });
-                    } else {
-                        appendCard(panes.layer2, {
-                            title: "没有登记项目",
-                            pathText: REGISTRY_PATH,
-                            reason: "项目登记表当前为空；在 instruction-projects.json 的 projects 中登记后重新运行。"
-                        });
-                    }
-                    return;
+                // ===== 第一级区块 =====
+                appendSectionHeader(panes.layer1, "第一级：用户级指令", "源：" + LAYER1_SOURCE + "　状态：" + LAYER1_STATE_PATH);
+                if (layer1.error) {
+                    appendCard(panes.layer1, {
+                        title: "第一级不可用",
+                        pathText: LAYER1_SOURCE,
+                        reason: layer1.error
+                    });
+                } else {
+                    appendChannelTargets(panes.layer1, layer1.plan.targets, "layer1", app, wrapRun, null, safeRefresh);
                 }
-                appendSectionHeader(
-                    panes[def.key],
-                    "第二级：" + (def.type === "work" ? "Work" : "Code") + " 类型（工作规范区块）",
-                    "源：" + TYPE_SOURCES[def.type].vaultPath + "　登记表：" + REGISTRY_PATH
-                );
-                appendRegisterRow(panes[def.key], def.type, def.type === "work" ? "Work" : "Code", app, function (target) {
-                    def.targets.push(target);
-                    layer2.plan.targets.push(target);
-                    if (target.action !== "unchanged") {
-                        def.pending += 1;
-                        refreshTabLabels();
+
+                // ===== 第二级区块：按类型分标签页 =====
+                paneDefs.slice(1).forEach(function (def) {
+                    if (def.key === "layer2") {
+                        appendSectionHeader(panes.layer2, "第二级：类型指令（工作规范区块）", "登记表：" + REGISTRY_PATH);
+                        if (layer2.error) {
+                            appendCard(panes.layer2, {
+                                title: "第二级不可用",
+                                pathText: REGISTRY_PATH,
+                                reason: layer2.error
+                            });
+                        } else {
+                            appendCard(panes.layer2, {
+                                title: "没有登记项目",
+                                pathText: REGISTRY_PATH,
+                                reason: "项目登记表当前为空；在 instruction-projects.json 的 projects 中登记后重新运行。"
+                            });
+                        }
+                        return;
                     }
-                    appendChannelTargets(panes[def.key], [target], def.key, app, wrapRun, wrapUnregister);
+                    appendSectionHeader(
+                        panes[def.key],
+                        "第二级：" + (def.type === "work" ? "Work" : "Code") + " 类型（工作规范区块）",
+                        "源：" + TYPE_SOURCES[def.type].vaultPath + "　登记表：" + REGISTRY_PATH
+                    );
+                    appendRegisterRow(panes[def.key], def.type, def.type === "work" ? "Work" : "Code", app, function (target) {
+                        def.targets.push(target);
+                        layer2.plan.targets.push(target);
+                        if (target.action !== "unchanged") {
+                            def.pending += 1;
+                            refreshTabLabels();
+                        }
+                        appendChannelTargets(panes[def.key], [target], def.key, app, wrapRun, wrapUnregister, safeRefresh);
+                    });
+                    appendChannelTargets(panes[def.key], def.targets, def.key, app, wrapRun, wrapUnregister, safeRefresh);
                 });
-                appendChannelTargets(panes[def.key], def.targets, def.key, app, wrapRun, wrapUnregister);
-            });
 
-            // 打开时停在第一个有待处理的标签页；都没有待处理则显示第一个。
-            var defaultKey = paneDefs[0].key;
-            for (var i = 0; i < paneDefs.length; i++) {
-                if (paneDefs[i].pending > 0) { defaultKey = paneDefs[i].key; break; }
+                // 刷新时尽量停留在原先的标签页；首次打开时停在第一个有待处理的标签页，都没有待处理则显示第一个。
+                var defaultKey = paneDefs.some(function (def) { return def.key === activeKey; }) ? activeKey : null;
+                if (!defaultKey) {
+                    defaultKey = paneDefs[0].key;
+                    for (var i = 0; i < paneDefs.length; i++) {
+                        if (paneDefs[i].pending > 0) { defaultKey = paneDefs[i].key; break; }
+                    }
+                }
+                activateTab(defaultKey);
+
+                if (area) area.remove();
+                area = nextArea;
+                content.appendChild(area);
+                content.scrollTop = prevScroll;
             }
-            activateTab(defaultKey);
 
+            render(initialLayer1, initialLayer2);
+
+            const refreshButton = el("button", null, "刷新");
             const undo = el("button", null, "撤销上次操作");
             const last = el("span", "margin-right:auto;align-self:center;");
-            const reload = () => { resolve(true); modal.close(); };
             refreshHistory = () => {
                 const operation = history.latest();
                 last.textContent = operation ? "上次操作：" + operation.label : "";
                 undo.disabled = !operation;
             };
             refreshHistory();
+            refreshButton.onclick = async () => {
+                if (plugin.syncBusy) return;
+                refreshButton.disabled = true;
+                try {
+                    await safeRefresh();
+                } finally {
+                    if (!closed) refreshButton.disabled = false;
+                }
+            };
             undo.onclick = async () => {
                 try {
                     const restored = await exclusive(() => history.undo(files => showConfirm(
                         "撤销上次操作", "以下文件在操作后又有修改。继续撤销会覆盖这些修改：\n" + files.join("\n"), "继续撤销"
                     )));
-                    if (restored) reload();
+                    if (restored) await safeRefresh();
                 } catch (error) { showMessage("撤销失败", error.message); }
             };
             const bulk = el("button", null, "一键分发");
             bulk.onclick = async () => {
                 try {
-                    if (await exclusive(distributeAll)) reload();
+                    if (await exclusive(distributeAll)) await safeRefresh();
                 } catch (error) { showMessage("分发失败", error.message); }
             };
             modal.footer.appendChild(last);
+            modal.footer.appendChild(refreshButton);
             modal.footer.appendChild(undo);
             modal.footer.appendChild(bulk);
             var closeButton = el("button", null, "关闭");
@@ -1546,7 +1592,24 @@ async function openInstructions(plugin) {
         });
     }
 
-    while (await displayPanel()) { /* Rebuild plans after a batch or undo. */ }
+    try {
+        configureStatePaths(app);
+    } catch (error) {
+        console.error("[sync-instructions]", error);
+        await showMessage("指令分发失败", error && error.message ? error.message : String(error));
+        return;
+    }
+
+    const initial = await loadPlans();
+    if (initial.layer1.error && initial.layer2.error && !history.latest()) {
+        await showMessage(
+            "指令分发失败",
+            "第一级：" + initial.layer1.error + "\n\n第二级：" + initial.layer2.error
+        );
+        return;
+    }
+
+    await showPanel(app, initial.layer1, initial.layer2);
 }
 
 module.exports = { openInstructions };

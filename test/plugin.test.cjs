@@ -477,6 +477,7 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
 
     let failSourceWrite = false;
     let failTargetWrite = false;
+    const notices = [];
     const filesystem = {
         ...fs,
         renameSync(from, to) {
@@ -497,7 +498,7 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
                 await fs.promises.writeFile(path.join(vaultRoot, file.path), text);
             },
         },
-    }, { fixtureDir, filesystem });
+    }, { fixtureDir, filesystem, notices });
 
     const panel = plugin.invoke("sync-instructions");
     await new Promise((resolve) => setImmediate(resolve));
@@ -508,6 +509,8 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
 
     const [distribute] = findElements(plugin.body, (element) => element.textContent === "备份并分发");
     await distribute.onclick();
+    assert.equal(notices.at(-1), "已分发到 样例项目");
+    assert.equal(findElements(plugin.body, (element) => element.textContent === "备份并分发").length, 0);
     assert.equal(read(target), newSection + "\n" + projectBody);
     assert.equal(read(path.join(stateFolder, "instruction-projects.json")), registry);
     assert.equal(read(userTarget), userBody);
@@ -578,6 +581,8 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
     assert.equal(fs.existsSync(journal), false);
     failSourceWrite = false;
     await recover.onclick();
+    assert.match(notices.at(-1), /已把项目工作规范回收进 Work 类型模板/);
+    assert.match(notices.at(-1), /现在可直接分发给其他同类型项目/);
     assert.equal(read(typeSource), sourceHeader + "# 工作规范\n来自目标的更新\n" + sourceTail);
     button("关闭").onclick();
     await recycle;
@@ -667,4 +672,148 @@ test("分发和撤销时保留目标符号链接", t => {
     replaceText(link, null);
     assert.equal(fs.existsSync(backing), false);
     assert.ok(fs.lstatSync(link).isSymbolicLink());
+});
+
+test("同步面板操作后原地刷新保留标签页与滚动位置，并支持手动刷新", async (t) => {
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-manager-refresh-"));
+    t.after(() => fs.rmSync(fixtureDir, { recursive: true, force: true }));
+
+    const vaultRoot = path.join(fixtureDir, "vault");
+    const syncDir = path.join(vaultRoot, ".obsidian", "plugins", "agents-manager", "sync");
+    const userSourcePath = path.join(vaultRoot, "用户指令.md");
+    const workSourcePath = path.join(vaultRoot, "Work模板.md");
+    const userTarget = path.join(fixtureDir, "home", ".codex", "AGENTS.md");
+    const targetA = path.join(fixtureDir, "project-a", "AGENTS.md");
+    const targetB = path.join(fixtureDir, "project-b", "AGENTS.md");
+
+    const write = (file, content) => {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, content, "utf8");
+    };
+    const read = (file) => fs.readFileSync(file, "utf8");
+    const hash = (value) => createHash("sha256").update(value, "utf8").digest("hex");
+    const tick = () => new Promise(resolve => setImmediate(resolve));
+
+    const v1 = "# 工作规范\n第一版规范";
+    const v1FromA = "# 工作规范\n项目A改进";
+    const bodyA = "# 项目A专属\n保留A\n";
+    const bodyB = "# 项目B专属\n保留B\n";
+    const templateTail = "# 项目模板\n模板示例\n";
+
+    write(userSourcePath, "用户指令内容\n");
+    write(workSourcePath, v1 + "\n" + templateTail);
+    write(targetA, v1FromA + "\n" + bodyA);
+    write(targetB, v1 + "\n" + bodyB);
+    write(path.join(syncDir, "instruction-projects.json"), JSON.stringify({
+        version: 1,
+        projects: [
+            { name: "项目A", type: "work", path: targetA },
+            { name: "项目B", type: "work", path: targetB },
+        ],
+    }));
+    write(path.join(syncDir, "type-instructions-sync.json"), JSON.stringify({
+        version: 1,
+        projects: [
+            { name: "项目A", type: "work", path: targetA, sourceSectionHash: hash(v1), targetSectionHash: hash(v1) },
+            { name: "项目B", type: "work", path: targetB, sourceSectionHash: hash(v1), targetSectionHash: hash(v1) },
+        ],
+    }));
+
+    const notices = [];
+    const plugin = await loadPlugin({
+        workspace: { getActiveFile: () => null, getLeavesOfType: () => [] },
+        vault: {
+            adapter: { getBasePath: () => vaultRoot },
+            getAbstractFileByPath: relative => ({ path: relative }),
+            async modify(file, text) {
+                await fs.promises.writeFile(path.join(vaultRoot, file.path), text);
+            },
+        },
+    }, {
+        fixtureDir,
+        notices,
+        settings: {
+            userSource: "用户指令.md",
+            workSource: "Work模板.md",
+            targets: { Codex: "~/.codex/AGENTS.md" },
+        },
+    });
+
+    const button = (label) => {
+        const [item] = findElements(plugin.body, node => node.tag === "button" && node.textContent === label);
+        assert.ok(item, label);
+        return item;
+    };
+    const tabStartingWith = (prefix) => {
+        const [item] = findElements(plugin.body, node => node.tag === "button" && node.textContent.startsWith(prefix));
+        assert.ok(item, prefix);
+        return item;
+    };
+
+    const panel = plugin.invoke("sync-instructions");
+    await tick();
+
+    // 初始时第一级有待处理项，默认停在第一级；手动切换到 Work 类型并设置滚动位置。
+    const modalEl = plugin.body.children[0];
+    const scrollContainer = modalEl.children[1];
+    assert.match(tabStartingWith("第一级：用户级指令").style.cssText, /font-weight:600/);
+    tabStartingWith("第二级：Work 类型").onclick();
+    scrollContainer.scrollTop = 120;
+
+    const assertStayedInWorkTab = (expectedTabText) => {
+        assert.equal(plugin.body.children[0], modalEl);
+        const workTab = tabStartingWith("第二级：Work 类型");
+        assert.equal(workTab.textContent, expectedTabText);
+        assert.match(workTab.style.cssText, /font-weight:600/);
+        assert.equal(scrollContainer.scrollTop, 120);
+    };
+
+    // 1. 回收项目A后，原地刷新，项目B立即可分发。
+    await button("用项目版本回收进模板").onclick();
+    assert.match(notices.at(-1), /已把项目工作规范回收进 Work 类型模板/);
+    assertStayedInWorkTab("第二级：Work 类型（1 待处理）");
+
+    // 2. 不关闭面板，直接把更新后的模板分发给项目B。
+    await button("备份并分发").onclick();
+    assert.equal(notices.at(-1), "已分发到 项目B");
+    assert.equal(read(targetB), v1FromA + "\n" + bodyB);
+    assertStayedInWorkTab("第二级：Work 类型");
+
+    // 3. 外部改动模板与项目A后点击底栏「刷新」按钮。
+    const v2 = "# 工作规范\n模板二次更新";
+    const v2FromA = "# 工作规范\n项目A二次更新";
+    write(workSourcePath, v2 + "\n" + templateTail);
+    write(targetA, v2FromA + "\n" + bodyA);
+    await button("刷新").onclick();
+    assertStayedInWorkTab("第二级：Work 类型（2 待处理）");
+    assert.ok(button("行级对比合并…"));
+    assert.ok(button("备份并分发"));
+
+    // 4. 行级对比合并项目A写回后，主面板原地刷新且待处理计数准确降至 1。
+    button("行级对比合并…").onclick();
+    const checkboxes = findElements(plugin.body, node => node.type === "checkbox");
+    assert.equal(checkboxes.length, 2);
+    for (const box of checkboxes) { box.checked = true; box.onchange(); }
+    await button("写回模板与项目").onclick();
+    await tick();
+    findElements(plugin.body, node => node.textContent === "关闭").at(-1).onclick();
+    assertStayedInWorkTab("第二级：Work 类型（1 待处理）");
+
+    // 5. 一键分发与撤销均在原地刷新，不重建弹窗。
+    const batch = button("一键分发").onclick();
+    await tick();
+    button("确认分发").onclick();
+    await batch;
+    await tick();
+    assert.equal(fs.existsSync(userTarget), true);
+    assertStayedInWorkTab("第二级：Work 类型");
+
+    await button("撤销上次操作").onclick();
+    await tick();
+    assert.equal(fs.existsSync(userTarget), false);
+    assertStayedInWorkTab("第二级：Work 类型（1 待处理）");
+
+    button("关闭").onclick();
+    await panel;
+    assert.equal(plugin.body.children.length, 0);
 });
