@@ -1,6 +1,6 @@
 # Agents Manager（多 Agent 管理）
 
-面向同时使用多个 Agent 的人，管理可跨工具共享的用户指令及项目规范，并保留各项目自己的内容。配套提供 Obsidian 笔记总结和选区翻译。
+面向同时使用多个 Agent 的人，管理可跨工具共享的用户指令、项目规范与 Agent 技能，并保留各项目自己的内容。配套提供 Obsidian 笔记总结和选区翻译。
 
 | 命令 | 插件行为 |
 | --- | --- |
@@ -16,7 +16,7 @@
 1. 从 [GitHub Releases](https://github.com/lvtian-bot/agents-manager/releases) 下载同一版本的 `main.js` 和 `manifest.json`。
 2. 在知识库的 Obsidian 配置目录下创建 `plugins/agents-manager/`，放入这两个文件。配置目录默认为 `.obsidian`。
 3. 重新打开 Obsidian，在「设置 → 第三方插件」启用「Agents Manager」，然后在插件设置中填写指令源和目标。
-4. 使用 AI 总结或翻译时，填写兼容 Chat Completions 的完整接口地址、模型名称和凭据环境变量名。三个字段初始为空。只使用指令同步时，模型连接可整组留空。
+4. 使用 AI 总结或翻译时，填写兼容 Chat Completions 的完整接口地址、模型名称和凭据环境变量名。三个字段初始为空。只使用指令同步或技能管理时，模型连接可整组留空。
 
 ## 本机文件与联网
 

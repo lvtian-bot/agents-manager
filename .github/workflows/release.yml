@@ -1,0 +1,121 @@
+name: Release Plugin
+
+on:
+  push:
+    tags:
+      - "[0-9]*.[0-9]*.[0-9]*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Verify version matches tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const tag = process.env.TAG || "";
+            if (!/^\d+\.\d+\.\d+$/.test(tag)) {
+              throw new Error(`Invalid tag format: ${tag}`);
+            }
+            const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            if (manifest.version !== tag) {
+              throw new Error(`manifest.json version (${manifest.version}) does not match tag (${tag})`);
+            }
+            if (pkg.version !== tag) {
+              throw new Error(`package.json version (${pkg.version}) does not match tag (${tag})`);
+            }
+            console.log(`Verified release version ${tag}`);
+          '
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and test
+        run: npm test
+
+      - name: Prepare release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const tag = process.env.TAG || "";
+            const envFile = process.env.GITHUB_ENV;
+            const archivePath = "docs/TODO-ARCHIVE.md";
+            if (!fs.existsSync(archivePath)) {
+              fs.appendFileSync(envFile, "HAS_NOTES_FILE=false\n");
+              process.exit(0);
+            }
+            const lines = fs.readFileSync(archivePath, "utf8").replace(/\r\n/g, "\n").split("\n");
+            const start = lines.findIndex(line => line.trim() === `## ${tag}`);
+            if (start < 0) {
+              fs.appendFileSync(envFile, "HAS_NOTES_FILE=false\n");
+              process.exit(0);
+            }
+            let end = lines.length;
+            for (let i = start + 1; i < lines.length; i++) {
+              if (/^##\s+/.test(lines[i])) {
+                end = i;
+                break;
+              }
+            }
+            const sectionLines = lines.slice(start + 1, end).map(line => {
+              if (!line.startsWith("- [x] ")) return line;
+              return "- " + line.slice(6).replace(/\s*\[[^\]]+\]\([^)]+\)\s*$/, "");
+            });
+            while (sectionLines.length && !sectionLines[0].trim()) sectionLines.shift();
+            while (sectionLines.length && !sectionLines[sectionLines.length - 1].trim()) sectionLines.pop();
+            if (!sectionLines.length) {
+              fs.appendFileSync(envFile, "HAS_NOTES_FILE=false\n");
+              process.exit(0);
+            }
+            const installNote = [
+              "### 安装方式",
+              "",
+              "将本版本的 `main.js` 和 `manifest.json` 放入知识库 `.obsidian/plugins/agents-manager/` 目录，重新打开 Obsidian 后在「设置 → 第三方插件」启用「Agents Manager」。",
+            ].join("\n");
+            const body = sectionLines.join("\n") + "\n\n" + installNote + "\n";
+            fs.writeFileSync("/tmp/release-notes.md", body, "utf8");
+            fs.appendFileSync(envFile, "HAS_NOTES_FILE=true\n");
+          '
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          for required in main.js manifest.json; do
+            if [ ! -s "$required" ]; then
+              echo "Missing or empty release asset: $required" >&2
+              exit 1
+            fi
+          done
+          assets=(main.js manifest.json)
+          if [ -s styles.css ]; then
+            assets+=(styles.css)
+          fi
+          if [ "${HAS_NOTES_FILE:-false}" = "true" ]; then
+            gh release create "$TAG" "${assets[@]}" \
+              --title "多 Agent 管理 $TAG" \
+              --notes-file /tmp/release-notes.md
+          else
+            gh release create "$TAG" "${assets[@]}" \
+              --title "多 Agent 管理 $TAG" \
+              --generate-notes
+          fi
