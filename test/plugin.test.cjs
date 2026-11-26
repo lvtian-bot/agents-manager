@@ -1777,3 +1777,428 @@ test("PR 复审第二轮回归：中断恢复确认外部修改、重复目标�
 
     await plugin.closeWorkspace();
 });
+
+test("技能管理自动纳入当前 Obsidian 仓库技能，支持去重、分发与来源兼容", async (t) => {
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-vault-skills-"));
+    t.after(() => fs.rmSync(fixtureDir, { recursive: true, force: true }));
+
+    const homeDir = path.join(fixtureDir, "home");
+    const userSkillsRoot = path.join(homeDir, ".agents", "skills");
+    const vaultRoot = path.join(fixtureDir, "vault-dir");
+    const syncDir = path.join(vaultRoot, ".obsidian", "plugins", "agents-manager", "sync");
+    const projRoot = path.join(fixtureDir, "other-proj");
+    const write = (file, content) => {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, content, "utf8");
+    };
+    const read = (file) => fs.readFileSync(file, "utf8");
+
+    write(path.join(userSkillsRoot, "user-skill", "SKILL.md"), "---\nname: user-skill\ndescription: 用户技能\n---\n");
+    write(path.join(projRoot, "AGENTS.md"), "# 规范\n规则\n# 项目\n其他项目\n");
+    write(path.join(projRoot, ".agents", "skills", "proj-skill", "SKILL.md"), "---\nname: proj-skill\ndescription: 项目技能\n---\n");
+    write(path.join(syncDir, "instruction-projects.json"), JSON.stringify({
+        version: 1,
+        projects: [{ name: "其他项目", type: "work", path: path.join(projRoot, "AGENTS.md") }],
+    }));
+
+    const vaultSkillMd = path.join(vaultRoot, ".agents", "skills", "vault-skill", "SKILL.md");
+    write(vaultSkillMd, "---\nname: vault-skill\ndescription: 仓库技能旧说明\n---\n\n# Vault\n旧内容\n");
+    const vaultGhDir = path.join(vaultRoot, ".agents", "skills", "vault-gh");
+    write(path.join(vaultGhDir, "SKILL.md"), "---\nname: vault-gh\ndescription: 仓库 GitHub 旧版\n---\n旧版\n");
+
+    const canonVaultRoot = process.platform === "win32" ? path.resolve(vaultRoot).toLowerCase() : path.resolve(vaultRoot);
+    write(path.join(syncDir, "skills-sources.json"), JSON.stringify({
+        version: 1,
+        skills: {
+            [canonVaultRoot + "/vault-gh"]: {
+                kind: "github",
+                url: "https://github.com/example/repo/tree/main/.agents/skills/vault-gh",
+                commit: "1111111111111111111111111111111111111111",
+            },
+        },
+    }));
+
+    let vaultDisplayName = "知识库名称";
+    const fetchOpts = {
+        fixtureDir,
+        notices: [],
+        settings: {
+            skillUserTargets: {},
+            skillProjectTargets: { Claude: ".claude/skills" },
+        },
+        async fetch(url) {
+            if (url.includes("/commits?")) {
+                return {
+                    ok: true,
+                    json: async () => [{ sha: "7777777777777777777777777777777777777777", commit: { message: "feat: vault gh" } }],
+                };
+            }
+            if (url.includes("/git/trees/7777777777777777777777777777777777777777")) {
+                return {
+                    ok: true,
+                    json: async () => ({
+                        truncated: false,
+                        tree: [{ type: "blob", path: ".agents/skills/vault-gh/SKILL.md", sha: "v1", mode: "100644" }],
+                    }),
+                };
+            }
+            if (url.endsWith("/.agents/skills/vault-gh/SKILL.md")) {
+                return { ok: true, arrayBuffer: async () => Buffer.from("---\nname: vault-gh\ndescription: 仓库 GitHub 新版\n---\n新版\n") };
+            }
+            assert.fail("未预期的请求：" + url);
+        },
+    };
+
+    const plugin = await loadPlugin({
+        workspace: { getActiveFile: () => null, getLeavesOfType: () => [] },
+        vault: {
+            adapter: { getBasePath: () => vaultRoot },
+            getName: () => vaultDisplayName,
+        },
+    }, fetchOpts);
+
+    const skillsHost = () => plugin.body.children[0].children[0].children[1].children[1];
+    const sButton = (label, index = 0) => {
+        for (const modal of plugin.body.children.slice(1).reverse()) {
+            const hit = findElements(modal, node => node.tag === "button" && node.textContent === label);
+            if (hit.length) return hit[index] || hit[0];
+        }
+        const inTab = findElements(skillsHost(), node => node.tag === "button" && node.textContent === label);
+        assert.ok(inTab.length > index, label);
+        return inTab[index];
+    };
+    const tick = () => new Promise(resolve => setImmediate(resolve));
+
+    // 1. 顺序检查：用户级技能 -> 当前仓库（取 vault.getName()） -> 其他已登记项目
+    await plugin.invoke("manage-skills");
+    const tabTexts = findElements(skillsHost(), node => node.tag === "button" && /（\d+）$/.test(node.textContent)).map(n => n.textContent);
+    assert.deepEqual(tabTexts, ["用户级技能（1）", "知识库名称（2）", "其他项目（1）"]);
+
+    // 2. 当前仓库自建编辑、GitHub 更新与按项目级目标一键分发 + 撤销
+    sButton("知识库名称（2）").onclick();
+    sButton("编辑 SKILL.md", 1).onclick();
+    const editor = findElements(plugin.body, node => node.tag === "textarea")[0];
+    editor.value = "---\nname: vault-skill\ndescription: 仓库技能新说明\n---\n\n# Vault\n新内容\n";
+    editor.oninput();
+    await sButton("保存").onclick();
+    assert.match(read(vaultSkillMd), /新内容/);
+
+    await sButton("更新").onclick();
+    assert.match(read(path.join(vaultGhDir, "SKILL.md")), /新版/);
+    const updatedSources = JSON.parse(read(path.join(syncDir, "skills-sources.json")));
+    assert.equal(updatedSources.skills[canonVaultRoot + "/vault-gh"].commit, "7777777777777777777777777777777777777777");
+
+    await sButton("撤销上次操作").onclick();
+    await tick();
+    assert.match(read(path.join(vaultGhDir, "SKILL.md")), /旧版/);
+
+    await sButton("一键分发").onclick();
+    assert.ok(fs.lstatSync(path.join(vaultRoot, ".claude", "skills", "vault-skill")).isSymbolicLink());
+    assert.ok(fs.lstatSync(path.join(vaultRoot, ".claude", "skills", "vault-gh")).isSymbolicLink());
+    assert.ok(fs.lstatSync(path.join(projRoot, ".claude", "skills", "proj-skill")).isSymbolicLink());
+    await plugin.closeWorkspace();
+
+    // 3. 无 vault.getName() 时回退目录名；若同时已在登记表中，仅展示一次并沿用登记名
+    const pluginFallback = await loadPlugin({
+        workspace: { getActiveFile: () => null, getLeavesOfType: () => [] },
+        vault: { adapter: { basePath: vaultRoot } },
+    }, fetchOpts);
+    await pluginFallback.invoke("manage-skills");
+    const fallbackTabs = findElements(
+        pluginFallback.body.children[0].children[0].children[1].children[1],
+        node => node.tag === "button" && /（\d+）$/.test(node.textContent)
+    ).map(n => n.textContent);
+    assert.deepEqual(fallbackTabs, ["用户级技能（1）", "vault-dir（2）", "其他项目（1）"]);
+    await pluginFallback.closeWorkspace();
+
+    write(path.join(vaultRoot, "AGENTS.md"), "# 规范\n规则\n# 本仓库\n");
+    write(path.join(syncDir, "instruction-projects.json"), JSON.stringify({
+        version: 1,
+        projects: [
+            { name: "已登记的本仓库", type: "work", path: path.join(vaultRoot, "AGENTS.md") },
+            { name: "其他项目", type: "work", path: path.join(projRoot, "AGENTS.md") },
+        ],
+    }));
+    const pluginDedup = await loadPlugin({
+        workspace: { getActiveFile: () => null, getLeavesOfType: () => [] },
+        vault: { adapter: { getBasePath: () => vaultRoot }, getName: () => vaultDisplayName },
+    }, fetchOpts);
+    await pluginDedup.invoke("manage-skills");
+    const dedupTabs = findElements(
+        pluginDedup.body.children[0].children[0].children[1].children[1],
+        node => node.tag === "button" && /（\d+）$/.test(node.textContent)
+    ).map(n => n.textContent);
+    assert.deepEqual(dedupTabs, ["用户级技能（1）", "已登记的本仓库（2）", "其他项目（1）"]);
+    await pluginDedup.closeWorkspace();
+
+    // 4. 仓库根目录与 homedir 相同时不重复显示；仓库无技能时不显示仓库标签页
+    const homeVaultPlugin = await loadPlugin({
+        workspace: { getActiveFile: () => null, getLeavesOfType: () => [] },
+        vault: { adapter: { getBasePath: () => homeDir }, getName: () => "HomeVault" },
+    }, { ...fetchOpts, settings: { skillUserTargets: {}, skillProjectTargets: {} } });
+    await homeVaultPlugin.invoke("manage-skills");
+    const homeTabs = findElements(
+        homeVaultPlugin.body.children[0].children[0].children[1].children[1],
+        node => node.tag === "button" && /（\d+）$/.test(node.textContent)
+    ).map(n => n.textContent);
+    assert.deepEqual(homeTabs, ["用户级技能（1）"]);
+    await homeVaultPlugin.closeWorkspace();
+
+    const emptyVault = path.join(fixtureDir, "empty-vault");
+    fs.mkdirSync(path.join(emptyVault, ".agents", "skills"), { recursive: true });
+    const emptyVaultPlugin = await loadPlugin({
+        workspace: { getActiveFile: () => null, getLeavesOfType: () => [] },
+        vault: { adapter: { getBasePath: () => emptyVault }, getName: () => "EmptyVault" },
+    }, { ...fetchOpts, settings: { skillUserTargets: {}, skillProjectTargets: {} } });
+    await emptyVaultPlugin.invoke("manage-skills");
+    const emptyTabs = findElements(
+        emptyVaultPlugin.body.children[0].children[0].children[1].children[1],
+        node => node.tag === "button" && /（\d+）$/.test(node.textContent)
+    ).map(n => n.textContent);
+    assert.deepEqual(emptyTabs, ["用户级技能（1）"]);
+    await emptyVaultPlugin.closeWorkspace();
+});
+
+test("笔记 AI 处理覆盖请求取消、接口错误及生成期间切换或修改笔记", async () => {
+    const tick = () => new Promise(resolve => setImmediate(resolve));
+    const baseSettings = {
+        endpoint: "https://example.org/v1/chat/completions",
+        model: "my-model",
+        credentialVariable: "TEST_MODEL_API_KEY",
+        summaryMode: "single",
+        singleTemplate: "",
+    };
+
+    // 1. 请求取消：fetch 挂起期间点击「放弃」，应中止请求且无错误 Notice、不写回
+    {
+        const notices = [];
+        const writes = [];
+        let capturedSignal = null;
+        let resolveFetch;
+        const app = {
+            workspace: {
+                getActiveFile: () => ({ path: "笔记A.md" }),
+                activeEditor: {
+                    editor: {
+                        getSelection: () => "Selected",
+                        getValue: () => "原文A",
+                        replaceSelection: value => writes.push(value),
+                    },
+                },
+            },
+            vault: { async read() { return "原文A"; } },
+        };
+        const plugin = await loadPlugin(app, {
+            notices,
+            settings: baseSettings,
+            fetch(_url, req) {
+                capturedSignal = req.signal;
+                return new Promise((resolve, reject) => {
+                    resolveFetch = resolve;
+                    req.signal.addEventListener("abort", () => reject(new Error("The operation was aborted")));
+                });
+            },
+        });
+        const pending = plugin.invoke("translate-selection");
+        await tick();
+        assert.equal(capturedSignal.aborted, false);
+        const [abandon] = findElements(plugin.body, el => el.tag === "button" && el.textContent === "放弃");
+        abandon.onclick();
+        await pending;
+        assert.equal(capturedSignal.aborted, true);
+        assert.deepEqual(notices, []);
+        assert.deepEqual(writes, []);
+        assert.equal(plugin.body.children.length, 0);
+        void resolveFetch;
+    }
+
+    // 2. 流式读取中途关闭弹窗也能安全中止，且 reader.cancel 抛错不产生未捕获异常
+    {
+        const notices = [];
+        let readStep = 0;
+        let readerCancelled = false;
+        const app = {
+            workspace: {
+                getActiveFile: () => ({ path: "笔记A.md" }),
+                activeEditor: {
+                    editor: {
+                        getSelection: () => "",
+                        getValue: () => "整篇正文",
+                        replaceSelection() {},
+                    },
+                },
+            },
+            vault: { async read() { return "整篇正文"; } },
+        };
+        const plugin = await loadPlugin(app, {
+            notices,
+            settings: baseSettings,
+            async fetch(_url, req) {
+                return {
+                    ok: true,
+                    body: {
+                        getReader: () => ({
+                            async read() {
+                                readStep += 1;
+                                if (readStep === 1) {
+                                    return { value: new TextEncoder().encode('data: {"choices":[{"delta":{"content":"前半"}}]}\n'), done: false };
+                                }
+                                return await new Promise((_, reject) => {
+                                    req.signal.addEventListener("abort", () => reject(new Error("aborted")));
+                                });
+                            },
+                            async cancel() {
+                                readerCancelled = true;
+                                throw new Error("cancel failure");
+                            },
+                            releaseLock() {},
+                        }),
+                    },
+                };
+            },
+        });
+        const pending = plugin.invoke("summarize-note");
+        await tick();
+        const [preview] = findElements(plugin.body, el => el.tag === "textarea");
+        assert.equal(preview.value, "前半");
+        const [abandon] = findElements(plugin.body, el => el.tag === "button" && el.textContent === "放弃");
+        abandon.onclick();
+        await pending;
+        assert.equal(readerCancelled, true);
+        assert.deepEqual(notices, []);
+        assert.equal(plugin.body.children.length, 0);
+    }
+
+    // 3. 接口错误与异常响应：预览框显示错误信息，保持只读且按钮禁用
+    const errorCases = [
+        {
+            name: "HTTP 500",
+            expected: "模型接口返回 HTTP 500。",
+            fetch: async () => ({ ok: false, status: 500 }),
+        },
+        {
+            name: "JSON error",
+            expected: "模型接口返回错误。",
+            fetch: async () => ({
+                ok: true,
+                headers: { get: () => "application/json" },
+                json: async () => ({ error: { message: "bad request" } }),
+            }),
+        },
+        {
+            name: "SSE stream error with failing reader.cancel",
+            expected: "模型在生成时返回错误。",
+            fetch: async () => ({
+                ok: true,
+                body: {
+                    getReader: () => ({
+                        async read() {
+                            return { value: new TextEncoder().encode('data: {"error":{"message":"stream fail"}}\n'), done: false };
+                        },
+                        async cancel() { throw new Error("cancel should not mask stream error"); },
+                        releaseLock() {},
+                    }),
+                },
+            }),
+        },
+        {
+            name: "网络异常",
+            expected: "网络连接失败",
+            fetch: async () => { throw new Error("网络连接失败"); },
+        },
+        {
+            name: "空白返回",
+            expected: "模型未返回内容。",
+            fetch: async () => ({
+                ok: true,
+                headers: { get: () => "application/json" },
+                json: async () => ({ choices: [{ message: { content: "   " } }] }),
+            }),
+        },
+        {
+            name: "缺少凭据环境变量",
+            expected: "MISSING_KEY_VAR",
+            settings: { ...baseSettings, credentialVariable: "MISSING_KEY_VAR" },
+            fetch: async () => assert.fail("缺少凭据时不应发起请求"),
+        },
+    ];
+
+    for (const item of errorCases) {
+        const notices = [];
+        const plugin = await loadPlugin({
+            workspace: {
+                getActiveFile: () => ({ path: "笔记.md" }),
+                activeEditor: { editor: { getSelection: () => "", getValue: () => "正文", replaceSelection() {} } },
+            },
+            vault: { async read() { return "正文"; } },
+        }, {
+            notices,
+            settings: item.settings || baseSettings,
+            fetch: item.fetch,
+        });
+        await plugin.invoke("summarize-note");
+        const [preview] = findElements(plugin.body, el => el.tag === "textarea");
+        const [replace] = findElements(plugin.body, el => el.tag === "button" && el.textContent === "替换");
+        const [insert] = findElements(plugin.body, el => el.tag === "button" && el.textContent === "插入");
+        assert.ok(preview.value.includes(item.expected), item.name);
+        assert.equal(preview.readOnly, true, item.name);
+        assert.equal(replace.disabled, true, item.name);
+        assert.equal(insert.disabled, true, item.name);
+        assert.deepEqual(notices, []);
+        findElements(plugin.body, el => el.tag === "button" && el.textContent === "放弃")[0].onclick();
+    }
+
+    // 4. 生成期间切换笔记、修改正文或切换编辑器实例：拒绝写回并保留预览窗口
+    const mutationScenarios = ["switch-file", "edit-content", "switch-editor"];
+    for (const scenario of mutationScenarios) {
+        const notices = [];
+        const writesA = [];
+        const writesB = [];
+        let currentFile = { path: "笔记A.md" };
+        let currentText = "初始内容";
+        const editorA = {
+            getSelection: () => "",
+            getValue: () => currentText,
+            replaceSelection: value => writesA.push(value),
+        };
+        const editorB = {
+            getSelection: () => "",
+            getValue: () => "另一编辑器内容",
+            replaceSelection: value => writesB.push(value),
+        };
+        let currentEditor = editorA;
+
+        const app = {
+            workspace: {
+                getActiveFile: () => currentFile,
+                activeEditor: { editor: currentEditor },
+            },
+            vault: { async read() { return currentText; } },
+        };
+        const plugin = await loadPlugin(app, {
+            notices,
+            settings: baseSettings,
+            async fetch() {
+                if (scenario === "switch-file") currentFile = { path: "笔记B.md" };
+                else if (scenario === "edit-content") currentText = "生成期间被修改";
+                else if (scenario === "switch-editor") plugin.plugin.app.workspace.activeEditor = { editor: editorB };
+                return {
+                    ok: true,
+                    headers: { get: () => "application/json" },
+                    json: async () => ({ choices: [{ message: { content: "摘要输出" } }] }),
+                };
+            },
+        });
+
+        await plugin.invoke("summarize-note");
+        const [preview] = findElements(plugin.body, el => el.tag === "textarea");
+        assert.equal(preview.value, "摘要输出");
+        findElements(plugin.body, el => el.tag === "button" && el.textContent === "替换")[0].onclick();
+        findElements(plugin.body, el => el.tag === "button" && el.textContent === "插入")[0].onclick();
+        assert.deepEqual(notices, ["原笔记或编辑器已变化，请重新运行。", "原笔记或编辑器已变化，请重新运行。"]);
+        assert.deepEqual(writesA, []);
+        assert.deepEqual(writesB, []);
+        assert.equal(plugin.body.children.length, 1);
+        findElements(plugin.body, el => el.tag === "button" && el.textContent === "放弃")[0].onclick();
+    }
+});
