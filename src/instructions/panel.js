@@ -6,16 +6,16 @@ const { Notice } = require("obsidian");
 const { syncDirectory, readText, replaceText, createHistory } = require("./storage");
 const { normalizeNewlines, extractInstructionBody, parseWorkStructure, rebuildDocument, computeLineDiff, composeMergedBody } = require("./documents");
 
-async function openInstructions(plugin) {
-    const { app, settings } = plugin;
-    const LAYER1_SOURCE = settings.userSource;
-    const LAYER1_TARGETS = Object.entries(settings.targets).map(([name, file]) => ({
+function mountInstructions(plugin, host) {
+    const { app } = plugin;
+    const getLayer1Source = () => plugin.settings.userSource;
+    const getLayer1Targets = () => Object.entries(plugin.settings.targets).map(([name, file]) => ({
         name, path: file.startsWith("~/") ? path.join(os.homedir(), file.slice(2)) : file,
     }));
-    const TYPE_SOURCES = {
-        work: { name: "Work 类型模板", vaultPath: settings.workSource },
-        code: { name: "Code 类型模板", vaultPath: settings.codeSource },
-    };
+    const getTypeSources = () => ({
+        work: { name: "Work 类型模板", vaultPath: plugin.settings.workSource },
+        code: { name: "Code 类型模板", vaultPath: plugin.settings.codeSource },
+    });
     // 通道实例：定义见下方 makeUserChannel／makeTypeChannel。
     var USER_CHANNEL = makeUserChannel();
     var TYPE_CHANNELS = {
@@ -29,7 +29,7 @@ async function openInstructions(plugin) {
     var LAYER1_STATE_PATH = null;
     var LAYER2_STATE_PATH = null;
 
-    let history;
+    let history = null;
     let refreshHistory = () => {};
     async function exclusive(action) {
         if (plugin.syncBusy) throw new Error("正在处理其他同步操作。");
@@ -44,8 +44,8 @@ async function openInstructions(plugin) {
         var layer2 = { error: null, plan: null };
 
         try {
-            var userSource = USER_CHANNEL.extractSource(await readVaultFile(app, LAYER1_SOURCE));
-            layer1.plan = buildChannelPlan(USER_CHANNEL, LAYER1_TARGETS, userSource, null, readChannelState(USER_CHANNEL));
+            var userSource = USER_CHANNEL.extractSource(await readVaultFile(app, getLayer1Source()));
+            layer1.plan = buildChannelPlan(USER_CHANNEL, getLayer1Targets(), userSource, null, readChannelState(USER_CHANNEL));
         } catch (error) {
             console.error("[sync-instructions] layer1", error);
             layer1.error = error && error.message ? error.message : String(error);
@@ -165,8 +165,9 @@ async function openInstructions(plugin) {
     }
 
     function validateUndo(entries) {
-        const notes = [LAYER1_SOURCE, TYPE_SOURCES.work.vaultPath, TYPE_SOURCES.code.vaultPath].filter(Boolean);
-        const targets = new Set(LAYER1_TARGETS.map(target => canonicalPath(target.path)));
+        const typeSources = getTypeSources();
+        const notes = [getLayer1Source(), typeSources.work.vaultPath, typeSources.code.vaultPath].filter(Boolean);
+        const targets = new Set(getLayer1Targets().map(target => canonicalPath(target.path)));
         if (entries.some(entry => entry.kind === "target" && !targets.has(canonicalPath(entry.path)))) {
             for (const project of readRegistry().projects) targets.add(canonicalPath(project.path));
         }
@@ -216,18 +217,18 @@ async function openInstructions(plugin) {
         var channel = {
             id: "user",
             layerLabel: "第一级",
-            sourceVaultPath: LAYER1_SOURCE,
+            get sourceVaultPath() { return getLayer1Source(); },
             sourceName: "用户指令源笔记",
             entriesKey: "targets",
             entryHasName: false,
-            stateSourcePath: LAYER1_SOURCE,
+            get stateSourcePath() { return getLayer1Source(); },
             hashFieldSource: "sourceHash",
             hashFieldTarget: "targetHash",
             statePath: null
         };
 
         channel.newState = function () {
-            return { version: 1, sourcePath: LAYER1_SOURCE, targets: [] };
+            return { version: 1, sourcePath: getLayer1Source(), targets: [] };
         };
 
         // 源提取：保留可选的 frontmatter 于源笔记，正文去尾部多余换行后保留单个结尾换行。
@@ -328,12 +329,13 @@ async function openInstructions(plugin) {
 
     // 类型通道（work／code）：源为类型模板，只同步第 1 个一级标题区块。
     function makeTypeChannel(typeKey) {
-        var definition = TYPE_SOURCES[typeKey];
+        var typeNames = { work: "Work 类型模板", code: "Code 类型模板" };
+        var sourceTitle = typeNames[typeKey];
         var channel = {
             id: typeKey,
             layerLabel: "第二级",
-            sourceVaultPath: definition.vaultPath,
-            sourceName: definition.name,
+            get sourceVaultPath() { return getTypeSources()[typeKey].vaultPath; },
+            sourceName: sourceTitle,
             entriesKey: "projects",
             entryHasName: true,
             stateSourcePath: null,
@@ -403,7 +405,7 @@ async function openInstructions(plugin) {
 
         channel.text = {
             deletedAfterSync: "项目文件在上次同步后被删除；确认后可用模板重新生成完整文件。",
-            initialCreate: "项目文件不存在，确认后从 " + definition.name + " 生成完整文件（含第三级示例，需自行按项目事实填写）。",
+            initialCreate: "项目文件不存在，确认后从 " + sourceTitle + " 生成完整文件（含第三级示例，需自行按项目事实填写）。",
             recordOnly: "工作规范区块已与模板一致，只需建立同步基线。",
             unchanged: "工作规范区块已与模板一致，已完成同步。",
             initialReview: "首次接入且工作规范与模板存在差异；可将项目版本回收进模板、用模板覆盖项目区块，或行级对比合并。",
@@ -417,14 +419,14 @@ async function openInstructions(plugin) {
             baselineChanged: "项目工作规范已变化，无法只建立基线：",
             changedDuringDialog: "点击后项目工作规范又发生了变化，已停止覆盖：",
             baselineSaved: "已建立同步基线，未改写项目文件。",
-            createdFromSource: "已从 " + definition.name + " 生成完整项目文件，并建立同步基线。",
+            createdFromSource: "已从 " + sourceTitle + " 生成完整项目文件，并建立同步基线。",
             recycleIdentical: "模板已与项目工作规范一致，已建立同步基线，未改写任何文件。",
-            recycleDone: "已把项目工作规范回收进 " + definition.name + "，该项目同步基线已更新。",
+            recycleDone: "已把项目工作规范回收进 " + sourceTitle + "，该项目同步基线已更新。",
             recycleTail: "\n现在可直接分发给其他同类型项目。",
             mergeDone: "两边已一致，该项目同步基线已更新；现在可直接分发给其他同类型项目。",
             mergeUnsavedSource: "两侧内容一致，但模板在编辑器中还有未保存的修改。\n请先保存模板，再点击面板底部的「刷新」。",
             mergeIdentical: "两侧内容完全一致，已为该项目建立同步基线。",
-            mergeTitle: function (target) { return "行级合并：" + target.name + " 工作规范 ← " + definition.name; },
+            mergeTitle: function (target) { return "行级合并：" + target.name + " 工作规范 ← " + sourceTitle; },
             mergeHelp: "勾=保留该行，不勾=移除。红行=仅模板有（默认不保留），绿行=仅项目有（默认保留）。" +
                 "默认合并结果即项目当前版本；勾选红行可把模板侧多出的内容并入。" +
                 "写回时模板与项目的工作规范区块同时替换为合并结果，两边保持一致；" +
@@ -533,7 +535,7 @@ async function openInstructions(plugin) {
             if (!project || typeof project.name !== "string" || !project.name) {
                 problems.push(label + "：缺少 name");
             }
-            if (!project || !TYPE_SOURCES[project.type]) {
+            if (!project || !getTypeSources()[project.type]) {
                 problems.push(label + "：type 必须是 work 或 code");
             }
             if (!project || typeof project.path !== "string" || !project.path) {
@@ -1266,9 +1268,10 @@ async function openInstructions(plugin) {
         const registry = readRegistry();
         const loaded = await loadTypeSources(app, registry);
         const targets = buildTypePlans(registry.projects, loaded.sources, loaded.errors).targets;
-        if (LAYER1_TARGETS.length) {
-            const source = USER_CHANNEL.extractSource(syncReadVault(app, LAYER1_SOURCE));
-            targets.push(...buildChannelPlan(USER_CHANNEL, LAYER1_TARGETS, source, null, readChannelState(USER_CHANNEL)).targets);
+        const layer1Targets = getLayer1Targets();
+        if (layer1Targets.length) {
+            const source = USER_CHANNEL.extractSource(syncReadVault(app, getLayer1Source()));
+            targets.push(...buildChannelPlan(USER_CHANNEL, layer1Targets, source, null, readChannelState(USER_CHANNEL)).targets);
         }
         const sources = new Set(targets.map(t => canonicalPath(path.join(VAULT_ROOT, t.channel.sourceVaultPath))));
         const seen = new Set();
@@ -1300,255 +1303,267 @@ async function openInstructions(plugin) {
         return true;
     }
 
-    function showPanel(app, initialLayer1, initialLayer2) {
-        return new Promise(function (resolve) {
-            var closed = false;
-            var activeKey = null;
-            var area = null;
-            var renderToken = 0;
+    var closed = false;
+    var activeKey = null;
+    var area = null;
+    var renderToken = 0;
 
-            var modal = createModal({
-                title: "分发与回收指令", width: 880, widthVw: 95, maxHeight: 88,
-                onClose: function () {
-                    closed = true;
-                    resolve();
-                }
-            });
-            var content = modal.body;
-            content.style.cssText = "padding:16px 18px;overflow:auto;";
+    host.empty?.();
+    var content = el("div", "flex:1;overflow:auto;padding:16px 18px;min-height:0;");
+    var footer = el("div",
+        "display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 18px;" +
+        "border-top:1px solid var(--background-modifier-border);flex-shrink:0;");
+    host.appendChild(content);
+    host.appendChild(footer);
 
-            content.appendChild(el("div",
-                "margin-bottom:14px;line-height:1.6;color:var(--text-muted);",
-                "可逐个处理，也可一键分发全部目标。第一级分发整份正文；" +
-                "第二级只同步第 1 个「# 」一级标题到第 2 个之间的区块，第 2 个一级标题及其后内容永不改动。"));
+    content.appendChild(el("div",
+        "margin-bottom:14px;line-height:1.6;color:var(--text-muted);",
+        "可逐个处理，也可一键分发全部目标。第一级分发整份正文；" +
+        "第二级只同步第 1 个「# 」一级标题到第 2 个之间的区块，第 2 个一级标题及其后内容永不改动。"));
 
-            var TAB_BASE_STYLE =
-                "flex:1;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;box-shadow:none;" +
-                "background:transparent;border:1px solid transparent;color:var(--text-muted);";
-            var TAB_ACTIVE_STYLE =
-                "flex:1;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;box-shadow:none;" +
-                "background:var(--background-secondary);border:1px solid var(--background-modifier-border);" +
-                "color:var(--text-normal);font-weight:600;";
+    var TAB_BASE_STYLE =
+        "flex:1;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;box-shadow:none;" +
+        "background:transparent;border:1px solid transparent;color:var(--text-muted);";
+    var TAB_ACTIVE_STYLE =
+        "flex:1;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;box-shadow:none;" +
+        "background:var(--background-secondary);border:1px solid var(--background-modifier-border);" +
+        "color:var(--text-normal);font-weight:600;";
 
-            async function refreshPanel() {
-                var token = ++renderToken;
-                var next = await loadPlans();
-                if (closed || token !== renderToken) return;
-                render(next.layer1, next.layer2);
-                refreshHistory();
-            }
-
-            async function safeRefresh() {
-                try {
-                    await refreshPanel();
-                } catch (error) {
-                    if (!closed) await showMessage("刷新失败", error && error.message ? error.message : String(error));
-                }
-            }
-
-            function render(layer1, layer2) {
-                var prevScroll = content.scrollTop || 0;
-                var nextArea = el("div");
-
-                // ===== 标签栏：第一级与第二级的 Work／Code 各占一个标签页 =====
-                // 待处理数 = 需要用户动手的目标数（unchanged 以外的动作）；整级不可用时记 1。
-                var paneDefs = [];
-                var layer1Pending = 0;
-                if (layer1.error) {
-                    layer1Pending = 1;
-                } else {
-                    layer1.plan.targets.forEach(function (target) {
-                        if (target.action !== "unchanged") layer1Pending += 1;
-                    });
-                }
-                paneDefs.push({ key: "layer1", label: "第一级：用户级指令", pending: layer1Pending });
-
-                if (layer2.error) {
-                    paneDefs.push({ key: "layer2", label: "第二级：类型指令", pending: 1 });
-                } else {
-                    ["work", "code"].forEach(function (typeKey) {
-                        var targets = layer2.plan.targets.filter(function (target) {
-                            return target.type === typeKey;
-                        });
-                        var pending = 0;
-                        targets.forEach(function (target) {
-                            if (target.action !== "unchanged") pending += 1;
-                        });
-                        paneDefs.push({
-                            key: "type-" + typeKey,
-                            label: "第二级：" + (typeKey === "work" ? "Work" : "Code") + " 类型",
-                            pending: pending,
-                            type: typeKey,
-                            targets: targets
-                        });
-                    });
-                    // 登记表为空时没有可拆的类型，回落为单个第二级标签页。
-                    if (paneDefs.length === 1) {
-                        paneDefs.push({ key: "layer2", label: "第二级：类型指令", pending: 0 });
-                    }
-                }
-
-                var tabBar = el("div", "display:flex;gap:8px;margin-bottom:12px;");
-                var tabs = {};
-                var panes = {};
-
-                var refreshTabLabels = function () {
-                    paneDefs.forEach(function (def) {
-                        tabs[def.key].textContent = def.label +
-                            (def.pending > 0 ? "（" + def.pending + " 待处理）" : "");
-                    });
-                };
-                var activateTab = function (key) {
-                    activeKey = key;
-                    paneDefs.forEach(function (def) {
-                        tabs[def.key].style.cssText = def.key === key ? TAB_ACTIVE_STYLE : TAB_BASE_STYLE;
-                        panes[def.key].style.display = def.key === key ? "" : "none";
-                    });
-                };
-                var settlePending = function (key, wasPending) {
-                    if (!wasPending) return;
-                    paneDefs.forEach(function (def) {
-                        if (def.key === key) def.pending = Math.max(0, def.pending - 1);
-                    });
-                    refreshTabLabels();
-                };
-
-                // 一键动作的统一收尾：成功执行后刷新待处理计数。
-                var wrapRun = function (key, target, apply) {
-                    return async function () {
-                        var wasPending = target.action !== "unchanged";
-                        var result = await exclusive(apply);
-                        target.action = "unchanged";
-                        settlePending(key, wasPending);
-                        return result;
-                    };
-                };
-
-                // 移除登记的收尾：卡片已随动作消失，这里只清待处理计数。
-                var wrapUnregister = function (key, target) {
-                    var wasPending = target.action !== "unchanged";
-                    target.action = "unchanged";
-                    settlePending(key, wasPending);
-                };
-
-                nextArea.appendChild(tabBar);
-                paneDefs.forEach(function (def) {
-                    tabs[def.key] = document.createElement("button");
-                    panes[def.key] = document.createElement("div");
-                    tabs[def.key].onclick = function () { activateTab(def.key); };
-                    tabBar.appendChild(tabs[def.key]);
-                    nextArea.appendChild(panes[def.key]);
-                });
-                refreshTabLabels();
-
-                // ===== 第一级区块 =====
-                appendSectionHeader(panes.layer1, "第一级：用户级指令", "源：" + LAYER1_SOURCE + "　状态：" + LAYER1_STATE_PATH);
-                if (layer1.error) {
-                    appendCard(panes.layer1, {
-                        title: "第一级不可用",
-                        pathText: LAYER1_SOURCE,
-                        reason: layer1.error
-                    });
-                } else {
-                    appendChannelTargets(panes.layer1, layer1.plan.targets, "layer1", app, wrapRun, null, safeRefresh);
-                }
-
-                // ===== 第二级区块：按类型分标签页 =====
-                paneDefs.slice(1).forEach(function (def) {
-                    if (def.key === "layer2") {
-                        appendSectionHeader(panes.layer2, "第二级：类型指令（工作规范区块）", "登记表：" + REGISTRY_PATH);
-                        if (layer2.error) {
-                            appendCard(panes.layer2, {
-                                title: "第二级不可用",
-                                pathText: REGISTRY_PATH,
-                                reason: layer2.error
-                            });
-                        } else {
-                            appendCard(panes.layer2, {
-                                title: "没有登记项目",
-                                pathText: REGISTRY_PATH,
-                                reason: "项目登记表当前为空；在 instruction-projects.json 的 projects 中登记后重新运行。"
-                            });
-                        }
-                        return;
-                    }
-                    appendSectionHeader(
-                        panes[def.key],
-                        "第二级：" + (def.type === "work" ? "Work" : "Code") + " 类型（工作规范区块）",
-                        "源：" + TYPE_SOURCES[def.type].vaultPath + "　登记表：" + REGISTRY_PATH
-                    );
-                    appendRegisterRow(panes[def.key], def.type, def.type === "work" ? "Work" : "Code", app, function (target) {
-                        def.targets.push(target);
-                        layer2.plan.targets.push(target);
-                        if (target.action !== "unchanged") {
-                            def.pending += 1;
-                            refreshTabLabels();
-                        }
-                        appendChannelTargets(panes[def.key], [target], def.key, app, wrapRun, wrapUnregister, safeRefresh);
-                    });
-                    appendChannelTargets(panes[def.key], def.targets, def.key, app, wrapRun, wrapUnregister, safeRefresh);
-                });
-
-                // 刷新时尽量停留在原先的标签页；首次打开时停在第一个有待处理的标签页，都没有待处理则显示第一个。
-                var defaultKey = paneDefs.some(function (def) { return def.key === activeKey; }) ? activeKey : null;
-                if (!defaultKey) {
-                    defaultKey = paneDefs[0].key;
-                    for (var i = 0; i < paneDefs.length; i++) {
-                        if (paneDefs[i].pending > 0) { defaultKey = paneDefs[i].key; break; }
-                    }
-                }
-                activateTab(defaultKey);
-
-                if (area) area.remove();
-                area = nextArea;
-                content.appendChild(area);
-                content.scrollTop = prevScroll;
-            }
-
-            render(initialLayer1, initialLayer2);
-
-            const refreshButton = el("button", null, "刷新");
-            const undo = el("button", null, "撤销上次操作");
-            const last = el("span", "margin-right:auto;align-self:center;");
-            refreshHistory = () => {
-                const operation = history.latest();
-                last.textContent = operation ? "上次操作：" + operation.label : "";
-                undo.disabled = !operation;
-            };
-            refreshHistory();
-            refreshButton.onclick = async () => {
-                if (plugin.syncBusy) return;
-                refreshButton.disabled = true;
-                try {
-                    await safeRefresh();
-                } finally {
-                    if (!closed) refreshButton.disabled = false;
-                }
-            };
-            undo.onclick = async () => {
-                try {
-                    const restored = await exclusive(() => history.undo(files => showConfirm(
-                        "撤销上次操作", "以下文件在操作后又有修改。继续撤销会覆盖这些修改：\n" + files.join("\n"), "继续撤销"
-                    )));
-                    if (restored) await safeRefresh();
-                } catch (error) { showMessage("撤销失败", error.message); }
-            };
-            const bulk = el("button", null, "一键分发");
-            bulk.onclick = async () => {
-                try {
-                    if (await exclusive(distributeAll)) await safeRefresh();
-                } catch (error) { showMessage("分发失败", error.message); }
-            };
-            modal.footer.appendChild(last);
-            modal.footer.appendChild(refreshButton);
-            modal.footer.appendChild(undo);
-            modal.footer.appendChild(bulk);
-            var closeButton = el("button", null, "关闭");
-            closeButton.className = "mod-cta";
-            closeButton.onclick = function () { modal.close(); };
-            modal.footer.appendChild(closeButton);
+    function renderInitError(error) {
+        var nextArea = el("div");
+        appendCard(nextArea, {
+            title: "指令分发失败",
+            pathText: "",
+            reason: error && error.message ? error.message : String(error)
         });
+        if (area) area.remove();
+        area = nextArea;
+        content.appendChild(area);
     }
+
+    async function refreshPanel() {
+        var token = ++renderToken;
+        if (!STATE_ROOT) {
+            configureStatePaths(app);
+        }
+        var next = await loadPlans();
+        if (closed || token !== renderToken) return;
+        render(next.layer1, next.layer2);
+        refreshHistory();
+    }
+
+    async function safeRefresh() {
+        try {
+            await refreshPanel();
+        } catch (error) {
+            if (!STATE_ROOT && !closed) {
+                renderInitError(error);
+                refreshHistory();
+                return;
+            }
+            if (!closed) await showMessage("刷新失败", error && error.message ? error.message : String(error));
+        }
+    }
+
+    function render(layer1, layer2) {
+        var prevScroll = content.scrollTop || 0;
+        var nextArea = el("div");
+        var layer1SourcePath = getLayer1Source();
+        var typeSources = getTypeSources();
+
+        // ===== 标签栏：第一级与第二级的 Work／Code 各占一个标签页 =====
+        // 待处理数 = 需要用户动手的目标数（unchanged 以外的动作）；整级不可用时记 1。
+        var paneDefs = [];
+        var layer1Pending = 0;
+        if (layer1.error) {
+            layer1Pending = 1;
+        } else {
+            layer1.plan.targets.forEach(function (target) {
+                if (target.action !== "unchanged") layer1Pending += 1;
+            });
+        }
+        paneDefs.push({ key: "layer1", label: "第一级：用户级指令", pending: layer1Pending });
+
+        if (layer2.error) {
+            paneDefs.push({ key: "layer2", label: "第二级：类型指令", pending: 1 });
+        } else {
+            ["work", "code"].forEach(function (typeKey) {
+                var targets = layer2.plan.targets.filter(function (target) {
+                    return target.type === typeKey;
+                });
+                var pending = 0;
+                targets.forEach(function (target) {
+                    if (target.action !== "unchanged") pending += 1;
+                });
+                paneDefs.push({
+                    key: "type-" + typeKey,
+                    label: "第二级：" + (typeKey === "work" ? "Work" : "Code") + " 类型",
+                    pending: pending,
+                    type: typeKey,
+                    targets: targets
+                });
+            });
+            // 登记表为空时没有可拆的类型，回落为单个第二级标签页。
+            if (paneDefs.length === 1) {
+                paneDefs.push({ key: "layer2", label: "第二级：类型指令", pending: 0 });
+            }
+        }
+
+        var tabBar = el("div", "display:flex;gap:8px;margin-bottom:12px;");
+        var tabs = {};
+        var panes = {};
+
+        var refreshTabLabels = function () {
+            paneDefs.forEach(function (def) {
+                tabs[def.key].textContent = def.label +
+                    (def.pending > 0 ? "（" + def.pending + " 待处理）" : "");
+            });
+        };
+        var activateTab = function (key) {
+            activeKey = key;
+            paneDefs.forEach(function (def) {
+                tabs[def.key].style.cssText = def.key === key ? TAB_ACTIVE_STYLE : TAB_BASE_STYLE;
+                panes[def.key].style.display = def.key === key ? "" : "none";
+            });
+        };
+        var settlePending = function (key, wasPending) {
+            if (!wasPending) return;
+            paneDefs.forEach(function (def) {
+                if (def.key === key) def.pending = Math.max(0, def.pending - 1);
+            });
+            refreshTabLabels();
+        };
+
+        // 一键动作的统一收尾：成功执行后刷新待处理计数。
+        var wrapRun = function (key, target, apply) {
+            return async function () {
+                var wasPending = target.action !== "unchanged";
+                var result = await exclusive(apply);
+                target.action = "unchanged";
+                settlePending(key, wasPending);
+                return result;
+            };
+        };
+
+        // 移除登记的收尾：卡片已随动作消失，这里只清待处理计数。
+        var wrapUnregister = function (key, target) {
+            var wasPending = target.action !== "unchanged";
+            target.action = "unchanged";
+            settlePending(key, wasPending);
+        };
+
+        nextArea.appendChild(tabBar);
+        paneDefs.forEach(function (def) {
+            tabs[def.key] = document.createElement("button");
+            panes[def.key] = document.createElement("div");
+            tabs[def.key].onclick = function () { activateTab(def.key); };
+            tabBar.appendChild(tabs[def.key]);
+            nextArea.appendChild(panes[def.key]);
+        });
+        refreshTabLabels();
+
+        // ===== 第一级区块 =====
+        appendSectionHeader(panes.layer1, "第一级：用户级指令", "源：" + layer1SourcePath + "　状态：" + LAYER1_STATE_PATH);
+        if (layer1.error) {
+            appendCard(panes.layer1, {
+                title: "第一级不可用",
+                pathText: layer1SourcePath,
+                reason: layer1.error
+            });
+        } else {
+            appendChannelTargets(panes.layer1, layer1.plan.targets, "layer1", app, wrapRun, null, safeRefresh);
+        }
+
+        // ===== 第二级区块：按类型分标签页 =====
+        paneDefs.slice(1).forEach(function (def) {
+            if (def.key === "layer2") {
+                appendSectionHeader(panes.layer2, "第二级：类型指令（工作规范区块）", "登记表：" + REGISTRY_PATH);
+                if (layer2.error) {
+                    appendCard(panes.layer2, {
+                        title: "第二级不可用",
+                        pathText: REGISTRY_PATH,
+                        reason: layer2.error
+                    });
+                } else {
+                    appendCard(panes.layer2, {
+                        title: "没有登记项目",
+                        pathText: REGISTRY_PATH,
+                        reason: "项目登记表当前为空；在 instruction-projects.json 的 projects 中登记后重新运行。"
+                    });
+                }
+                return;
+            }
+            appendSectionHeader(
+                panes[def.key],
+                "第二级：" + (def.type === "work" ? "Work" : "Code") + " 类型（工作规范区块）",
+                "源：" + typeSources[def.type].vaultPath + "　登记表：" + REGISTRY_PATH
+            );
+            appendRegisterRow(panes[def.key], def.type, def.type === "work" ? "Work" : "Code", app, function (target) {
+                def.targets.push(target);
+                layer2.plan.targets.push(target);
+                if (target.action !== "unchanged") {
+                    def.pending += 1;
+                    refreshTabLabels();
+                }
+                appendChannelTargets(panes[def.key], [target], def.key, app, wrapRun, wrapUnregister, safeRefresh);
+            });
+            appendChannelTargets(panes[def.key], def.targets, def.key, app, wrapRun, wrapUnregister, safeRefresh);
+        });
+
+        // 刷新时尽量停留在原先的标签页；首次打开时停在第一个有待处理的标签页，都没有待处理则显示第一个。
+        var defaultKey = paneDefs.some(function (def) { return def.key === activeKey; }) ? activeKey : null;
+        if (!defaultKey) {
+            defaultKey = paneDefs[0].key;
+            for (var i = 0; i < paneDefs.length; i++) {
+                if (paneDefs[i].pending > 0) { defaultKey = paneDefs[i].key; break; }
+            }
+        }
+        activateTab(defaultKey);
+
+        if (area) area.remove();
+        area = nextArea;
+        content.appendChild(area);
+        content.scrollTop = prevScroll;
+    }
+
+    const refreshButton = el("button", null, "刷新");
+    const undo = el("button", null, "撤销上次操作");
+    const bulk = el("button", null, "一键分发");
+    const last = el("span", "margin-right:auto;align-self:center;");
+    refreshHistory = () => {
+        const operation = history ? history.latest() : null;
+        last.textContent = operation ? "上次操作：" + operation.label : "";
+        undo.disabled = !operation;
+        bulk.disabled = !STATE_ROOT;
+    };
+    refreshButton.onclick = async () => {
+        if (plugin.syncBusy) return;
+        refreshButton.disabled = true;
+        try {
+            await safeRefresh();
+        } finally {
+            if (!closed) refreshButton.disabled = false;
+        }
+    };
+    undo.onclick = async () => {
+        if (!history) return;
+        try {
+            const restored = await exclusive(() => history.undo(files => showConfirm(
+                "撤销上次操作", "以下文件在操作后又有修改。继续撤销会覆盖这些修改：\n" + files.join("\n"), "继续撤销"
+            )));
+            if (restored) await safeRefresh();
+        } catch (error) { showMessage("撤销失败", error.message); }
+    };
+    bulk.onclick = async () => {
+        if (!STATE_ROOT) return;
+        try {
+            if (await exclusive(distributeAll)) await safeRefresh();
+        } catch (error) { showMessage("分发失败", error.message); }
+    };
+    footer.appendChild(last);
+    footer.appendChild(refreshButton);
+    footer.appendChild(undo);
+    footer.appendChild(bulk);
 
     // 轻量确认弹窗：确认 resolve(true)，取消或关闭 resolve(false)。
     // 确认按钮先落定结果再关闭，onClose 的 resolve(false) 不会覆盖已落定的值。
@@ -1592,24 +1607,26 @@ async function openInstructions(plugin) {
         });
     }
 
-    try {
-        configureStatePaths(app);
-    } catch (error) {
-        console.error("[sync-instructions]", error);
-        await showMessage("指令分发失败", error && error.message ? error.message : String(error));
-        return;
-    }
+    var ready = (async function () {
+        try {
+            configureStatePaths(app);
+        } catch (error) {
+            console.error("[sync-instructions]", error);
+            if (!closed) {
+                renderInitError(error);
+                refreshHistory();
+            }
+            return;
+        }
+        await safeRefresh();
+    })();
 
-    const initial = await loadPlans();
-    if (initial.layer1.error && initial.layer2.error && !history.latest()) {
-        await showMessage(
-            "指令分发失败",
-            "第一级：" + initial.layer1.error + "\n\n第二级：" + initial.layer2.error
-        );
-        return;
-    }
-
-    await showPanel(app, initial.layer1, initial.layer2);
+    return {
+        ready: ready,
+        refresh: safeRefresh,
+        destroy: function () { closed = true; },
+        isBusy: function () { return Boolean(plugin.syncBusy); }
+    };
 }
 
-module.exports = { openInstructions };
+module.exports = { mountInstructions };

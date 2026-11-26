@@ -1,11 +1,13 @@
 const { Notice, Plugin, Modal } = require("obsidian");
 const { loadSettings, ManagerSettings } = require("./settings");
 const { editWithAI } = require("./notes");
+const { WORKSPACE_VIEW_TYPE, ManagerWorkspaceView } = require("./workspace");
 
 module.exports = class AgentsManager extends Plugin {
     async onload() {
         this.settings = loadSettings(this.app, await this.loadData(), this.manifest?.dir);
         this.modals = new Set();
+        this.registerView(WORKSPACE_VIEW_TYPE, leaf => new ManagerWorkspaceView(leaf, this));
         this.addSettingTab(new ManagerSettings(this));
         this.addCommand({
             id: "summarize-note", name: "AI 总结笔记",
@@ -17,13 +19,29 @@ module.exports = class AgentsManager extends Plugin {
         });
         this.addCommand({
             id: "sync-instructions", name: "分发与回收指令",
-            callback: () => this.run(async () => {
-                if (this.syncOpen) return;
-                this.syncOpen = true;
-                try { await require("./instructions/panel").openInstructions(this); }
-                finally { this.syncOpen = false; }
-            }),
+            callback: () => this.run(() => this.openWorkspace("instructions")),
         });
+        this.addCommand({
+            id: "manage-skills", name: "管理技能",
+            callback: () => this.run(() => this.openWorkspace("skills")),
+        });
+    }
+
+    async openWorkspace(section) {
+        const existing = this.app.workspace.getLeavesOfType(WORKSPACE_VIEW_TYPE)[0];
+        const leaf = existing || this.app.workspace.getLeaf("tab");
+        if (leaf.view instanceof ManagerWorkspaceView) {
+            await leaf.view.setSection(section);
+        } else {
+            this._pendingSection = section;
+            try {
+                await leaf.setViewState({ type: WORKSPACE_VIEW_TYPE, active: true, state: { section } });
+            } finally {
+                this._pendingSection = null;
+            }
+        }
+        await this.app.workspace.revealLeaf(leaf);
+        return leaf;
     }
 
     async run(action) {

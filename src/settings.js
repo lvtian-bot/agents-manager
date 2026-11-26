@@ -8,6 +8,15 @@ const harnessTargets = {
     WorkBuddy: "~/.workbuddy/rules/AGENTS.md",
 };
 
+const defaultSkillUserTargets = {
+    Claude: "~/.claude/skills",
+    Antigravity: "~/.gemini/config/skills",
+};
+
+const defaultSkillProjectTargets = {
+    Claude: ".claude/skills",
+};
+
 const legacySources = {
     userSource: "8-永久笔记/人工智能/37-用户指令.md",
     workSource: "8-永久笔记/人工智能/37.1-Work项目指令模板.md",
@@ -30,7 +39,10 @@ function loadSettings(app, data, pluginDir) {
         userSource: "", workSource: "", codeSource: "",
         ...(existing ? legacySources : {}),
         targets: existing ? { ...harnessTargets } : {},
+        githubCredentialVariable: "",
         ...saved,
+        skillUserTargets: saved.skillUserTargets ? { ...saved.skillUserTargets } : { ...defaultSkillUserTargets },
+        skillProjectTargets: saved.skillProjectTargets ? { ...saved.skillProjectTargets } : { ...defaultSkillProjectTargets },
     };
 }
 
@@ -40,6 +52,29 @@ function vaultPath(value) {
         throw new Error("请使用库内相对路径。");
     }
     return value.replace(/\\/g, "/");
+}
+
+function skillUserPath(value) {
+    const normalized = String(value || "").trim().replace(/\\/g, "/").replace(/\/+$/, "");
+    if (!normalized) throw new Error("此项不能为空。");
+    if (normalized.split("/").includes("..")) throw new Error("路径中不能包含 ..。");
+    if (!normalized.startsWith("~/") && !path.isAbsolute(normalized) && !/^[A-Za-z]:\//.test(normalized)) {
+        throw new Error("用户级技能目录须使用 ~/ 或绝对路径。");
+    }
+    return normalized;
+}
+
+function skillProjectPath(value) {
+    const normalized = vaultPath(value).replace(/^\.\//, "").replace(/\/+$/, "");
+    if (!normalized) throw new Error("此项不能为空。");
+    if (normalized === ".agents/skills") throw new Error("项目级分发目标不能是 .agents/skills 本身。");
+    return normalized;
+}
+
+function envVariableName(value) {
+    if (!value) return "";
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) throw new Error("请填写有效的环境变量名。");
+    return value;
 }
 
 function modelEndpoint(value) {
@@ -220,6 +255,12 @@ class ManagerSettings extends PluginSettingTab {
         field(container, "workSource", "Work 项目模板", "同步前两个一级标题之间的区块。", vaultPath);
         field(container, "codeSource", "Code 项目模板", "各项目的目标在同步面板中登记。", vaultPath);
 
+        container.createEl("h3", { text: "技能管理" });
+        mapping(container, "skillUserTargets", "用户级技能分发目标", "工具名称", "技能目录", "添加目标", skillUserPath);
+        mapping(container, "skillProjectTargets", "项目级技能分发目标", "工具名称", "相对技能目录", "添加目标", skillProjectPath);
+        const githubGroup = disclosure(container, "GitHub 更新凭据");
+        field(githubGroup, "githubCredentialVariable", "GitHub 凭据环境变量名", "可选，留空时匿名访问 GitHub API（每小时限 60 次）。只填写变量名。", envVariableName);
+
         container.createEl("h3", { text: "AI 总结笔记" });
         const setting = new Setting(container).setName("总结模式");
         const mode = setting.controlEl.createEl("select", { attr: { "aria-label": "总结模式" } });
@@ -247,10 +288,7 @@ class ManagerSettings extends PluginSettingTab {
         const connectionInputs = [
             field(model, "endpoint", "模型接口", "兼容 Chat Completions 的完整请求地址。", validateConnectionField(modelEndpoint)),
             field(model, "model", "模型名称", "", validateConnectionField(required)),
-            field(model, "credentialVariable", "凭据环境变量名", "只填写变量名。", validateConnectionField(value => {
-                if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) throw new Error("请填写有效的环境变量名。");
-                return value;
-            })),
+            field(model, "credentialVariable", "凭据环境变量名", "只填写变量名。", validateConnectionField(value => envVariableName(required(value)))),
         ];
         new Setting(container).addButton(button => button.setButtonText("保存设置").setCta().onClick(async () => {
             clearError();
@@ -273,4 +311,4 @@ class ManagerSettings extends PluginSettingTab {
         }));
     }
 }
-module.exports = { loadSettings, ManagerSettings };
+module.exports = { loadSettings, ManagerSettings, defaultSkillUserTargets, defaultSkillProjectTargets };
