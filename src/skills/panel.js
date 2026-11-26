@@ -57,7 +57,7 @@ function mountSkills(plugin, host) {
 
     content.appendChild(el("div",
         "margin-bottom:14px;line-height:1.6;color:var(--text-muted);",
-        "扫描用户级 ~/.agents/skills 与已登记项目的 .agents/skills（无技能的项目不显示）。" +
+        "扫描用户级 ~/.agents/skills、当前 Obsidian 仓库及已登记项目的 .agents/skills（无技能的目录不显示）。" +
         "自建技能可直接编辑 SKILL.md；GitHub 复制技能点「更新」直接拉取最新文件。"));
 
     function createModal(options) {

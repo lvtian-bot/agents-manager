@@ -21,12 +21,28 @@ function expandHome(filePath) {
     return path.resolve(raw);
 }
 
-function resolveStateRoot(plugin) {
-    const app = plugin.app;
+function resolveVaultRoot(plugin) {
+    const app = plugin?.app;
     const adapter = app?.vault?.adapter;
-    const vaultRoot = typeof adapter?.getBasePath === "function"
+    return typeof adapter?.getBasePath === "function"
         ? adapter.getBasePath()
         : (typeof adapter?.basePath === "string" ? adapter.basePath : null);
+}
+
+function resolveVaultName(plugin, vaultRoot, registeredProject) {
+    if (registeredProject && typeof registeredProject.name === "string" && registeredProject.name.trim()) {
+        return registeredProject.name.trim();
+    }
+    const vaultName = plugin?.app?.vault?.getName?.();
+    if (typeof vaultName === "string" && vaultName.trim()) {
+        return vaultName.trim();
+    }
+    return path.basename(vaultRoot);
+}
+
+function resolveStateRoot(plugin) {
+    const app = plugin.app;
+    const vaultRoot = resolveVaultRoot(plugin);
     if (!vaultRoot) {
         throw new Error("无法定位当前 Obsidian 仓库根目录，已停止读取或写入技能状态。");
     }
@@ -278,6 +294,7 @@ function scanAllSkillScopes(plugin, stateRoot) {
     const scopes = [];
 
     const userSourceRoot = path.join(os.homedir(), ".agents", "skills");
+    const userSourceRootKey = canonicalPath(userSourceRoot);
     scopes.push({
         key: "user",
         kind: "user",
@@ -289,6 +306,31 @@ function scanAllSkillScopes(plugin, stateRoot) {
     });
 
     const seenRoots = new Set();
+    const vaultRoot = resolveVaultRoot(plugin);
+    if (vaultRoot) {
+        const vaultRootKey = canonicalPath(vaultRoot);
+        const vaultSourceRoot = path.join(vaultRoot, ".agents", "skills");
+        seenRoots.add(vaultRootKey);
+        if (canonicalPath(vaultSourceRoot) !== userSourceRootKey) {
+            const registeredVaultProject = projects.find(
+                project => canonicalPath(path.dirname(project.path)) === vaultRootKey
+            );
+            const vaultSkills = scanSkillsInDir(vaultSourceRoot, "vault", vaultRoot, sourcesDoc.skills);
+            if (vaultSkills.length) {
+                scopes.push({
+                    key: "vault:" + vaultRootKey,
+                    kind: "vault",
+                    type: registeredVaultProject?.type || "vault",
+                    name: resolveVaultName(plugin, vaultRoot, registeredVaultProject),
+                    projectRoot: vaultRoot,
+                    sourceRoot: vaultSourceRoot,
+                    skills: vaultSkills,
+                    harnessTargets: buildHarnessTargets(plugin.settings.skillProjectTargets, vaultRoot),
+                });
+            }
+        }
+    }
+
     for (const project of projects) {
         const projectRoot = path.dirname(project.path);
         const rootKey = canonicalPath(projectRoot);
@@ -296,6 +338,7 @@ function scanAllSkillScopes(plugin, stateRoot) {
         seenRoots.add(rootKey);
 
         const sourceRoot = path.join(projectRoot, ".agents", "skills");
+        if (canonicalPath(sourceRoot) === userSourceRootKey) continue;
         const skills = scanSkillsInDir(sourceRoot, "project", projectRoot, sourcesDoc.skills);
         if (!skills.length) continue;
 

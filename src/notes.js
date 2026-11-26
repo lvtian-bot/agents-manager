@@ -44,7 +44,7 @@ async function requestText(settings, prompt, signal, onText) {
             if (done) { consume(pending); break; }
         }
     } finally {
-        await reader.cancel?.();
+        try { await reader.cancel?.(); } catch {}
         reader.releaseLock?.();
     }
 }
