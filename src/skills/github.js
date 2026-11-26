@@ -127,7 +127,7 @@ async function listEntriesViaContents(parsed, targetSha, dirPath, headers) {
         } else if (item.type === "file") {
             const rel = prefix ? (item.path.startsWith(prefix) ? item.path.slice(prefix.length) : "") : item.path;
             if (isIncludedRelPath(rel)) {
-                entries.push({ rel, repoPath: item.path, sha: item.sha });
+                entries.push({ rel, repoPath: item.path, sha: item.sha, mode: item.mode || "100644" });
             }
         }
     }
@@ -154,7 +154,7 @@ async function listTreeEntries(parsed, targetSha, settings) {
         if (prefix && !item.path.startsWith(prefix)) continue;
         const rel = prefix ? item.path.slice(prefix.length) : item.path;
         if (!isIncludedRelPath(rel)) continue;
-        entries.push({ rel, repoPath: item.path, sha: item.sha });
+        entries.push({ rel, repoPath: item.path, sha: item.sha, mode: item.mode || "100644" });
     }
 
     if (!entries.some(entry => entry.rel === "SKILL.md")) {
@@ -171,7 +171,7 @@ async function downloadEntries(parsed, targetSha, entries, settings) {
             ? `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/git/blobs/${encodeURIComponent(entry.sha)}`
             : `https://raw.githubusercontent.com/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/${encodeURIComponent(targetSha)}/${encodeUriPath(entry.repoPath)}`;
         const buf = await fetchBuffer(url, hasAuth ? headers : { "User-Agent": "agents-manager-obsidian-plugin" });
-        files.push({ rel: entry.rel, base64: buf.toString("base64") });
+        files.push({ rel: entry.rel, base64: buf.toString("base64"), mode: entry.mode === "100755" ? 0o755 : 0o644 });
     }
     files.sort((a, b) => a.rel.localeCompare(b.rel));
     return files;

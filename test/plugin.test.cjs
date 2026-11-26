@@ -1182,3 +1182,153 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     await plugin.closeWorkspace();
     assert.equal(plugin.body.children.length, 0);
 });
+
+
+test("PR 审查回归：并发编辑不回滚外部改动、GitHub 更新保留权限与类型转换且拒绝内部软链接", async (t) => {
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-skills-review-"));
+    t.after(() => fs.rmSync(fixtureDir, { recursive: true, force: true }));
+
+    const vaultRoot = path.join(fixtureDir, "vault");
+    const syncDir = path.join(vaultRoot, ".obsidian", "plugins", "agents-manager", "sync");
+    const homeDir = path.join(fixtureDir, "home");
+    const userSkillsRoot = path.join(homeDir, ".agents", "skills");
+    const outsideDir = path.join(fixtureDir, "outside");
+    const write = (file, content) => {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, content, "utf8");
+    };
+    const read = (file) => fs.readFileSync(file, "utf8");
+    const tick = () => new Promise(resolve => setImmediate(resolve));
+
+    const selfMd = path.join(userSkillsRoot, "self-skill", "SKILL.md");
+    write(selfMd, "---\nname: self-skill\ndescription: 原说明\n---\n原正文\n");
+
+    const ghDir = path.join(userSkillsRoot, "gh-skill");
+    write(path.join(ghDir, "SKILL.md"), "---\nname: gh-skill\ndescription: 旧版\n---\n旧内容\n");
+    write(path.join(ghDir, "references"), "原本是普通文件\n");
+    write(path.join(ghDir, "nested", "item.md"), "原本在子目录里\n");
+    write(path.join(outsideDir, "run.sh"), "外部文件不应被覆盖\n");
+
+    write(path.join(syncDir, "skills-sources.json"), JSON.stringify({
+        version: 1,
+        skills: {
+            "user/gh-skill": {
+                kind: "github",
+                url: "https://github.com/example/repo/tree/main/gh-skill",
+                commit: "1111111111111111111111111111111111111111",
+            },
+        },
+    }));
+
+    const chmodCalls = [];
+    const filesystem = {
+        ...fs,
+        chmodSync(target, mode) {
+            chmodCalls.push({ target, mode });
+            return fs.chmodSync(target, mode);
+        },
+    };
+
+    const plugin = await loadPlugin({
+        workspace: { getActiveFile: () => null, getLeavesOfType: () => [] },
+        vault: { adapter: { getBasePath: () => vaultRoot } },
+    }, {
+        fixtureDir,
+        filesystem,
+        notices: [],
+        settings: {
+            skillUserTargets: {},
+            skillProjectTargets: {},
+        },
+        async fetch(url) {
+            if (url.includes("/commits?")) {
+                return {
+                    ok: true,
+                    json: async () => [{
+                        sha: "3333333333333333333333333333333333333333",
+                        commit: { message: "feat: convert types", committer: { date: "2026-11-26T15:00:00Z" } },
+                    }],
+                };
+            }
+            if (url.includes("/git/trees/")) {
+                return {
+                    ok: true,
+                    json: async () => ({
+                        truncated: false,
+                        tree: [
+                            { type: "blob", path: "gh-skill/SKILL.md", sha: "b1", mode: "100644" },
+                            { type: "blob", path: "gh-skill/references/guide.md", sha: "b2", mode: "100644" },
+                            { type: "blob", path: "gh-skill/nested", sha: "b3", mode: "100644" },
+                            { type: "blob", path: "gh-skill/scripts/run.sh", sha: "b4", mode: "100755" },
+                        ],
+                    }),
+                };
+            }
+            if (url.endsWith("/gh-skill/SKILL.md")) return { ok: true, arrayBuffer: async () => Buffer.from("---\nname: gh-skill\ndescription: 新版\n---\n新内容\n") };
+            if (url.endsWith("/gh-skill/references/guide.md")) return { ok: true, arrayBuffer: async () => Buffer.from("新目录内指南\n") };
+            if (url.endsWith("/gh-skill/nested")) return { ok: true, arrayBuffer: async () => Buffer.from("新普通文件\n") };
+            if (url.endsWith("/gh-skill/scripts/run.sh")) return { ok: true, arrayBuffer: async () => Buffer.from("#!/bin/sh\necho ok\n") };
+            assert.fail("未预期的请求：" + url);
+        },
+    });
+
+    const skillsHost = () => plugin.body.children[0].children[0].children[1].children[1];
+    const sButton = (label) => {
+        for (const modal of plugin.body.children.slice(1).reverse()) {
+            const hit = findElements(modal, node => node.tag === "button" && node.textContent === label);
+            if (hit.length) return hit[0];
+        }
+        const inTab = findElements(skillsHost(), node => node.tag === "button" && node.textContent === label);
+        assert.ok(inTab.length > 0, label);
+        return inTab[0];
+    };
+
+    await plugin.invoke("manage-skills");
+
+    // 1. 并发编辑：前置检查失败绝不能用旧内容覆盖外部修改，也不残留 pending 记录
+    sButton("编辑 SKILL.md").onclick();
+    const editor = findElements(plugin.body, node => node.tag === "textarea")[0];
+    editor.value = "---\nname: self-skill\ndescription: 弹窗修改\n---\n弹窗内容\n";
+    write(selfMd, "---\nname: self-skill\ndescription: 外部最新\n---\n外部最新正文\n");
+    const saveFail = sButton("保存").onclick();
+    await tick();
+    assert.ok(findElements(plugin.body, node => node.textContent?.includes("文件已发生变化")).length > 0);
+    sButton("关闭").onclick();
+    await saveFail;
+    sButton("取消").onclick();
+    assert.match(read(selfMd), /外部最新正文/);
+    assert.equal(fs.existsSync(path.join(syncDir, "skills-pending-operation.json")), false);
+    assert.equal(fs.existsSync(path.join(syncDir, "skills-last-operation.json")), false);
+
+    // 2. 技能内部存在软链接（指向外部目录）时拒绝 GitHub 更新，外部文件与撤销槽均不受影响
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    const scriptsLink = path.join(ghDir, "scripts");
+    fs.symlinkSync(outsideDir, scriptsLink, linkType);
+    const blockedUpdate = sButton("更新").onclick();
+    await tick();
+    assert.ok(findElements(plugin.body, node => node.textContent?.includes("技能目录内包含软链接")).length > 0);
+    sButton("关闭").onclick();
+    await blockedUpdate;
+    assert.equal(read(path.join(outsideDir, "run.sh")), "外部文件不应被覆盖\n");
+    assert.equal(fs.existsSync(path.join(syncDir, "skills-pending-operation.json")), false);
+    assert.equal(fs.existsSync(path.join(syncDir, "skills-last-operation.json")), false);
+    fs.unlinkSync(scriptsLink);
+
+    // 3. 移除阻挡软链接后更新：文件<->目录双向转换成功且脚本保留 0o755 权限，撤销也能反向恢复
+    await sButton("更新").onclick();
+    assert.equal(read(path.join(ghDir, "references", "guide.md")), "新目录内指南\n");
+    assert.equal(read(path.join(ghDir, "nested")), "新普通文件\n");
+    assert.equal(read(path.join(ghDir, "scripts", "run.sh")), "#!/bin/sh\necho ok\n");
+    const runShChmod = chmodCalls.find(item => item.target === path.join(ghDir, "scripts", "run.sh"));
+    assert.equal(runShChmod?.mode, 0o755);
+    const opRecord = JSON.parse(read(path.join(syncDir, "skills-last-operation.json")));
+    assert.equal(opRecord.afterFiles.find(file => file.rel === "scripts/run.sh").mode, 0o755);
+
+    await sButton("撤销上次操作").onclick();
+    await tick();
+    assert.equal(read(path.join(ghDir, "references")), "原本是普通文件\n");
+    assert.equal(read(path.join(ghDir, "nested", "item.md")), "原本在子目录里\n");
+    assert.equal(fs.existsSync(path.join(ghDir, "scripts", "run.sh")), false);
+
+    await plugin.closeWorkspace();
+});

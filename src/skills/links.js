@@ -178,7 +178,11 @@ function snapshotDirectoryFiles(rootDir) {
             if (entry.isDirectory()) {
                 walk(full, rel);
             } else if (entry.isFile()) {
-                files.push({ rel, base64: fs.readFileSync(full).toString("base64") });
+                const item = { rel, base64: fs.readFileSync(full).toString("base64") };
+                if (process.platform !== "win32") {
+                    item.mode = (fs.statSync(full).mode & 0o111) ? 0o755 : 0o644;
+                }
+                files.push(item);
             }
         }
     }
@@ -187,19 +191,59 @@ function snapshotDirectoryFiles(rootDir) {
     return files;
 }
 
-function writeSnapshotFiles(rootDir, files, expectedOldFiles) {
-    const nextRels = new Set(files.map(item => item.rel));
-    fs.mkdirSync(rootDir, { recursive: true });
-    for (const item of files) {
-        const dest = path.join(rootDir, ...item.rel.split("/"));
-        fs.mkdirSync(path.dirname(dest), { recursive: true });
-        const buf = Buffer.from(item.base64, "base64");
-        fs.writeFileSync(dest, buf);
+function assertNoSymlinksForSnapshot(rootDir) {
+    const rootStat = fs.lstatSync(rootDir, { throwIfNoEntry: false });
+    if (!rootStat) return;
+    if (rootStat.isSymbolicLink()) {
+        throw new Error("技能根目录是软链接，已拒绝更新以免影响链接目标：" + rootDir);
     }
+    if (!rootStat.isDirectory()) return;
+    function walk(current, relBase) {
+        for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+            const full = path.join(current, entry.name);
+            const rel = relBase ? relBase + "/" + entry.name : entry.name;
+            if (entry.isSymbolicLink()) {
+                throw new Error("技能目录内包含软链接（" + rel + "），已拒绝写入以免覆盖链接目标。");
+            }
+            if (entry.isDirectory()) walk(full, rel);
+        }
+    }
+    walk(rootDir, "");
+}
+
+function writeSnapshotFiles(rootDir, files, expectedOldFiles) {
+    assertNoSymlinksForSnapshot(rootDir);
+    const nextRels = new Set(files.map(item => item.rel));
     for (const old of expectedOldFiles) {
         if (!nextRels.has(old.rel)) {
             const target = path.join(rootDir, ...old.rel.split("/"));
-            if (fs.existsSync(target)) fs.unlinkSync(target);
+            const stat = fs.lstatSync(target, { throwIfNoEntry: false });
+            if (stat && stat.isFile()) fs.unlinkSync(target);
+        }
+    }
+    cleanEmptySubdirs(rootDir);
+
+    fs.mkdirSync(rootDir, { recursive: true });
+    for (const item of files) {
+        const parts = item.rel.split("/");
+        let current = rootDir;
+        for (let i = 0; i < parts.length - 1; i++) {
+            current = path.join(current, parts[i]);
+            const ancStat = fs.lstatSync(current, { throwIfNoEntry: false });
+            if (ancStat && !ancStat.isDirectory()) {
+                fs.unlinkSync(current);
+            }
+        }
+        const dest = path.join(rootDir, ...parts);
+        const destStat = fs.lstatSync(dest, { throwIfNoEntry: false });
+        if (destStat && destStat.isDirectory()) {
+            fs.rmSync(dest, { recursive: true, force: true });
+        }
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        const buf = Buffer.from(item.base64, "base64");
+        fs.writeFileSync(dest, buf);
+        if (typeof item.mode === "number") {
+            fs.chmodSync(dest, item.mode);
         }
     }
     cleanEmptySubdirs(rootDir);
@@ -224,32 +268,42 @@ function createSkillsHistory(stateRoot) {
     };
     const latest = () => readOp(pendingPath) || readOp(lastPath);
 
-    async function runForward(op) {
+    async function runForward(op, rollbackLog) {
         if (op.type === "edit-skill") {
             if (readText(op.path) !== op.before) {
                 throw new Error("文件已发生变化，请刷新后重试：" + op.path);
             }
+            rollbackLog.mutated = true;
             replaceText(op.path, op.after);
             return;
         }
         if (op.type === "link-batch") {
             const linkType = linkTypeForPlatform();
-            const createdDirs = new Set();
+            for (const item of op.actions) {
+                const info = inspectPath(item.linkPath);
+                if (item.kind === "create" && info.kind !== "missing") {
+                    throw new Error("目标路径已存在内容，已停止：" + item.linkPath);
+                }
+                if (item.kind === "remove" && info.kind !== "symlink") {
+                    throw new Error("目标不是软链接，已停止删除：" + item.linkPath);
+                }
+            }
+            const createdDirs = [];
             for (const item of op.actions) {
                 if (item.kind === "create") {
                     for (const dir of collectMissingAncestors(path.dirname(item.linkPath))) {
-                        createdDirs.add(dir);
-                    }
-                    if (inspectPath(item.linkPath).kind !== "missing") {
-                        throw new Error("目标路径已存在内容，已停止：" + item.linkPath);
+                        if (!createdDirs.includes(dir)) createdDirs.push(dir);
                     }
                     fs.mkdirSync(path.dirname(item.linkPath), { recursive: true });
                     fs.symlinkSync(item.targetPath, item.linkPath, linkType);
+                    rollbackLog.actions.push(item);
+                    rollbackLog.createdDirs = createdDirs.slice();
                 } else if (item.kind === "remove") {
                     safeUnlinkSymlink(item.linkPath);
+                    rollbackLog.actions.push(item);
                 }
             }
-            op.createdDirs = Array.from(createdDirs);
+            op.createdDirs = createdDirs;
             return;
         }
         if (op.type === "convert-whole-dir") {
@@ -258,6 +312,7 @@ function createSkillsHistory(stateRoot) {
             if (dirInfo.kind !== "symlink" || canonicalPath(dirInfo.resolvedTarget) !== canonicalPath(op.wholeTarget)) {
                 throw new Error("目标目录不再是指向源目录的整目录链接：" + op.targetDir);
             }
+            rollbackLog.mutated = true;
             safeUnlinkSymlink(op.targetDir);
             fs.mkdirSync(op.targetDir, { recursive: true });
             for (const skill of op.skills) {
@@ -266,6 +321,8 @@ function createSkillsHistory(stateRoot) {
             return;
         }
         if (op.type === "github-update") {
+            assertNoSymlinksForSnapshot(op.skillDir);
+            rollbackLog.mutated = true;
             writeSnapshotFiles(op.skillDir, op.afterFiles, op.beforeFiles);
             replaceText(op.sourcesPath, op.afterSourcesText);
         }
@@ -344,9 +401,14 @@ function createSkillsHistory(stateRoot) {
             const current = readText(op.path);
             if (current !== op.after && current !== op.before) return [op.path];
         } else if (op.type === "github-update") {
-            const currentDisk = JSON.stringify(snapshotDirectoryFiles(op.skillDir));
-            const expectedAfter = JSON.stringify(op.afterFiles);
-            const expectedBefore = JSON.stringify(op.beforeFiles);
+            const normalizeFiles = list => list.map(file => ({
+                rel: file.rel,
+                base64: file.base64,
+                ...(process.platform !== "win32" && typeof file.mode === "number" ? { exec: Boolean(file.mode & 0o111) } : {}),
+            }));
+            const currentDisk = JSON.stringify(normalizeFiles(snapshotDirectoryFiles(op.skillDir)));
+            const expectedAfter = JSON.stringify(normalizeFiles(op.afterFiles));
+            const expectedBefore = JSON.stringify(normalizeFiles(op.beforeFiles));
             const currentSources = readText(op.sourcesPath);
             const dirChanged = currentDisk !== expectedAfter && currentDisk !== expectedBefore;
             const sourcesChanged = currentSources !== op.afterSourcesText && currentSources !== op.beforeSourcesText;
@@ -361,13 +423,20 @@ function createSkillsHistory(stateRoot) {
     async function apply(op) {
         if (fs.existsSync(pendingPath)) throw new Error("上次技能操作尚未完成，请先撤销上次操作。");
         replaceText(pendingPath, JSON.stringify(op));
+        const rollbackLog = { mutated: false, actions: [], createdDirs: [] };
         try {
-            await runForward(op);
+            await runForward(op, rollbackLog);
             replaceText(pendingPath, JSON.stringify(op));
             fs.renameSync(pendingPath, lastPath);
         } catch (error) {
             try {
-                await runRestore(op, true);
+                if (op.type === "link-batch") {
+                    if (rollbackLog.actions.length || rollbackLog.createdDirs.length) {
+                        await runRestore({ ...op, actions: rollbackLog.actions, createdDirs: rollbackLog.createdDirs }, true);
+                    }
+                } else if (rollbackLog.mutated) {
+                    await runRestore(op, true);
+                }
                 if (fs.existsSync(pendingPath)) fs.unlinkSync(pendingPath);
             } catch (recoveryError) {
                 throw new Error(error.message + "\n可通过「撤销上次操作」继续恢复。\n" + recoveryError.message);
