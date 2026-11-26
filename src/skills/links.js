@@ -556,13 +556,13 @@ function createSkillsHistory(stateRoot) {
         if (!op) return false;
 
         validateBeforeUndo(op);
-        let forceConfirm = interrupted;
+        let forceConfirm = false;
+        const changed = detectExternalEdits(op);
+        if (changed.length) {
+            if (!await confirmChanges(changed)) return false;
+            forceConfirm = true;
+        }
         if (!interrupted) {
-            const changed = detectExternalEdits(op);
-            if (changed.length) {
-                if (!await confirmChanges(changed)) return false;
-                forceConfirm = true;
-            }
             fs.renameSync(lastPath, pendingPath);
         }
 
@@ -639,7 +639,8 @@ async function convertWholeDirToPerSkill(history, scope, harnessState) {
 }
 
 async function distributeAllSkills(history, scopes) {
-    const actions = [];
+    const planned = new Map();
+    const conflicted = new Set();
     let skippedWholeDir = 0;
     let skippedConflicts = 0;
 
@@ -657,7 +658,21 @@ async function distributeAllSkills(history, scopes) {
             for (const skill of scope.skills) {
                 const sState = hState.skills[skill.name];
                 if (sState.status === "unlinked") {
-                    actions.push({ kind: "create", linkPath: sState.linkPath, targetPath: skill.dir });
+                    const linkKey = canonicalPath(sState.linkPath);
+                    if (conflicted.has(linkKey)) {
+                        skippedConflicts += 1;
+                        continue;
+                    }
+                    const existing = planned.get(linkKey);
+                    if (existing) {
+                        if (canonicalPath(existing.targetPath) !== canonicalPath(skill.dir)) {
+                            planned.delete(linkKey);
+                            conflicted.add(linkKey);
+                            skippedConflicts += 1;
+                        }
+                        continue;
+                    }
+                    planned.set(linkKey, { kind: "create", linkPath: sState.linkPath, targetPath: skill.dir });
                 } else if (sState.status === "conflict" || sState.status === "broken") {
                     skippedConflicts += 1;
                 }
@@ -665,6 +680,7 @@ async function distributeAllSkills(history, scopes) {
         }
     }
 
+    const actions = Array.from(planned.values());
     if (actions.length) {
         await history.apply({
             type: "link-batch",

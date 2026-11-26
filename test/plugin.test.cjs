@@ -1695,3 +1695,85 @@ test("PR 复审回归：拒绝上游软链接条目并正确解析含斜杠分�
 
     await plugin.closeWorkspace();
 });
+
+
+test("PR 复审第二轮回归：中断恢复确认外部修改、重复目标路径一键分发去重与冲突隔离", async (t) => {
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-round5-"));
+    t.after(() => fs.rmSync(fixtureDir, { recursive: true, force: true }));
+
+    const vaultRoot = path.join(fixtureDir, "vault");
+    const syncDir = path.join(vaultRoot, ".obsidian", "plugins", "agents-manager", "sync");
+    const homeDir = path.join(fixtureDir, "home");
+    const userSkillsRoot = path.join(homeDir, ".agents", "skills");
+    const sharedDir = path.join(homeDir, ".shared-skills");
+    const uniqueDir = path.join(homeDir, ".unique-skills");
+    const write = (file, content) => {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, content, "utf8");
+    };
+    const read = (file) => fs.readFileSync(file, "utf8");
+    const tick = () => new Promise(resolve => setImmediate(resolve));
+
+    const selfMd = path.join(userSkillsRoot, "demo-skill", "SKILL.md");
+    write(selfMd, "---\nname: demo-skill\ndescription: 外部编辑后内容\n---\n外部最新内容\n");
+    write(path.join(syncDir, "skills-pending-operation.json"), JSON.stringify({
+        type: "edit-skill",
+        label: "编辑 demo-skill",
+        path: selfMd,
+        before: "---\nname: demo-skill\ndescription: 旧内容\n---\n旧正文\n",
+        after: "---\nname: demo-skill\ndescription: 中断写入\n---\n中断内容\n",
+    }));
+
+    const plugin = await loadPlugin({
+        workspace: { getActiveFile: () => null, getLeavesOfType: () => [] },
+        vault: { adapter: { getBasePath: () => vaultRoot } },
+    }, {
+        fixtureDir,
+        notices: [],
+        settings: {
+            skillUserTargets: {
+                ToolA: "~/.shared-skills",
+                ToolB: "~/.shared-skills",
+                ToolC: "~/.unique-skills",
+            },
+            skillProjectTargets: {},
+        },
+    });
+
+    const skillsHost = () => plugin.body.children[0].children[0].children[1].children[1];
+    const sButton = (label) => {
+        for (const modal of plugin.body.children.slice(1).reverse()) {
+            const hit = findElements(modal, node => node.tag === "button" && node.textContent === label);
+            if (hit.length) return hit[0];
+        }
+        const inTab = findElements(skillsHost(), node => node.tag === "button" && node.textContent === label);
+        assert.ok(inTab.length > 0, label);
+        return inTab[0];
+    };
+
+    await plugin.invoke("manage-skills");
+
+    // 1. 存在 pending 中断记录但文件已被外部修改时，撤销必须先确认；取消则保留外部修改
+    const cancelPending = sButton("撤销上次操作").onclick();
+    await tick();
+    assert.ok(findElements(plugin.body, n => n.textContent?.includes("以下目标在操作后又有修改")).length > 0);
+    sButton("取消").onclick();
+    await cancelPending;
+    assert.match(read(selfMd), /外部最新内容/);
+    assert.equal(fs.existsSync(path.join(syncDir, "skills-pending-operation.json")), true);
+
+    const confirmPending = sButton("撤销上次操作").onclick();
+    await tick();
+    sButton("继续撤销").onclick();
+    await confirmPending;
+    await tick();
+    assert.match(read(selfMd), /旧正文/);
+    assert.equal(fs.existsSync(path.join(syncDir, "skills-pending-operation.json")), false);
+
+    // 2. 两个工具共用 ~/.shared-skills 时，一键分发按路径去重只建一次，不因 EEXIST 回滚 ToolC
+    await sButton("一键分发").onclick();
+    assert.ok(fs.lstatSync(path.join(sharedDir, "demo-skill")).isSymbolicLink());
+    assert.ok(fs.lstatSync(path.join(uniqueDir, "demo-skill")).isSymbolicLink());
+
+    await plugin.closeWorkspace();
+});
