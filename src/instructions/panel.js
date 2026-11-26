@@ -611,6 +611,7 @@ function mountInstructions(plugin, host) {
                 // findSyncEntry／saveSyncEntry 内部做规范化。
                 path: item.path,
                 displayPath: item.displayPath || item.path,
+                sourceVaultPath: channel.sourceVaultPath,
                 source: source,
                 currentHash: null,
                 action: null,
@@ -683,9 +684,16 @@ function mountInstructions(plugin, host) {
         return { targets: targets };
     }
 
+    function assertSourceUnchanged(target) {
+        if (target.sourceVaultPath && target.channel.sourceVaultPath !== target.sourceVaultPath) {
+            throw new Error("源笔记设置已变化，请先点击「刷新」再操作。");
+        }
+    }
+
     // 分发（含建立基线与覆盖确认）：目标不存在时从源生成完整文件，
     // 已存在时只替换参与同步的部分，通道外的内容（如第三级）原样保留。
     function planDistribution(changes, target) {
+        assertSourceUnchanged(target);
         const { channel, source } = target;
         const current = fs.existsSync(target.path) ? channel.readTargetDocument(target.path) : null;
         if (channel.extractSource(syncReadVault(app, channel.sourceVaultPath)).fullBody !== source.fullBody ||
@@ -706,6 +714,7 @@ function mountInstructions(plugin, host) {
     }
 
     async function applyChannelRecycle(channel, target, app) {
+        assertSourceUnchanged(target);
         const external = channel.readTargetSection(target.path);
         const source = channel.readSourceDocument(app);
         const changes = changeSet();
@@ -882,12 +891,14 @@ function mountInstructions(plugin, host) {
             leftText: sourceSectionNow,
             rightText: targetSectionNow,
             getLeft: function () {
+                assertSourceUnchanged(target);
                 return channel.readSourceSection(app);
             },
             getRight: function () {
                 return channel.readTargetSection(target.path);
             },
             onIdentical: async function () {
+                assertSourceUnchanged(target);
                 var diskSection = channel.readSourceSectionFromDisk();
                 if (diskSection !== sourceSectionNow) {
                     return channel.text.mergeUnsavedSource;
@@ -902,6 +913,7 @@ function mountInstructions(plugin, host) {
             applyLabel: channel.text.mergeApplyLabel,
             previewLabel: "合并结果（同时写回两侧，实时刷新）：",
             apply: async function (mergedSection) {
+                assertSourceUnchanged(target);
                 // 两侧先解析核对、再写回，避免写回一半留下不一致状态。
                 var normalized = channel.normalizeMerged(mergedSection);
                 var sourceDocument = channel.readSourceDocument(app);
@@ -959,6 +971,9 @@ function mountInstructions(plugin, host) {
             };
             var canMerge = ["conflict", "initial-review"].indexOf(target.action) >= 0 && fileExists;
             var openMerge = canMerge ? function () {
+                if (target.sourceVaultPath && channel.sourceVaultPath !== target.sourceVaultPath) {
+                    return showMessage("行级对比失败", "源笔记设置已变化，请先点击「刷新」再操作。").then(function () { return "error"; });
+                }
                 return showMergeModal(buildChannelMergeConfig(channel, target, app));
             } : null;
             var afterMerge = onChanged ? function () { return onChanged(); } : null;

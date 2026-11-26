@@ -347,10 +347,18 @@ function createSkillsHistory(stateRoot) {
                     if (info.kind !== "symlink") {
                         throw new Error("目标路径已变为非软链接，无法撤销：" + item.linkPath);
                     }
+                    if (!forceConfirm && canonicalPath(info.resolvedTarget) !== canonicalPath(item.targetPath)) {
+                        throw new Error("软链接在操作后被改为指向其他目标：" + item.linkPath);
+                    }
                     safeUnlinkSymlink(item.linkPath);
                 } else if (item.kind === "remove") {
-                    if (info.kind === "symlink") continue;
-                    if (info.kind !== "missing") {
+                    if (info.kind === "symlink") {
+                        if (canonicalPath(info.resolvedTarget) === canonicalPath(item.targetPath)) continue;
+                        if (!forceConfirm) {
+                            throw new Error("目标路径已被其他软链接占用：" + item.linkPath);
+                        }
+                        safeUnlinkSymlink(item.linkPath);
+                    } else if (info.kind !== "missing") {
                         throw new Error("目标路径已存在其他内容，无法恢复软链接：" + item.linkPath);
                     }
                     fs.mkdirSync(path.dirname(item.linkPath), { recursive: true });
@@ -400,6 +408,27 @@ function createSkillsHistory(stateRoot) {
         if (op.type === "edit-skill") {
             const current = readText(op.path);
             if (current !== op.after && current !== op.before) return [op.path];
+        } else if (op.type === "link-batch") {
+            const changed = [];
+            for (const item of op.actions) {
+                const info = inspectPath(item.linkPath);
+                if (info.kind === "symlink" && canonicalPath(info.resolvedTarget) !== canonicalPath(item.targetPath)) {
+                    changed.push(item.linkPath);
+                }
+            }
+            return changed;
+        } else if (op.type === "convert-whole-dir") {
+            const changed = [];
+            const dirInfo = inspectPath(op.targetDir);
+            if (dirInfo.kind === "directory") {
+                for (const skill of op.skills) {
+                    const info = inspectPath(skill.linkPath);
+                    if (info.kind === "symlink" && canonicalPath(info.resolvedTarget) !== canonicalPath(skill.targetPath)) {
+                        changed.push(skill.linkPath);
+                    }
+                }
+            }
+            return changed;
         } else if (op.type === "github-update") {
             const normalizeFiles = list => list.map(file => ({
                 rel: file.rel,

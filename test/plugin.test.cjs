@@ -1332,3 +1332,93 @@ test("PR 审查回归：并发编辑不回滚外部改动、GitHub 更新保留�
 
     await plugin.closeWorkspace();
 });
+
+
+test("PR 第二轮审查回归：链接改向撤销提示、源设置变更拦截及测试库隔离用户技能目标", async (t) => {
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-round2-"));
+    t.after(() => fs.rmSync(fixtureDir, { recursive: true, force: true }));
+
+    const vaultRoot = path.join(fixtureDir, "vault");
+    const syncDir = path.join(vaultRoot, ".obsidian", "plugins", "agents-manager", "sync");
+    const homeDir = path.join(fixtureDir, "home");
+    const userSkillsRoot = path.join(homeDir, ".agents", "skills");
+    const claudeUserSkills = path.join(homeDir, ".claude", "skills");
+    const userTarget = path.join(homeDir, ".codex", "AGENTS.md");
+    const write = (file, content) => {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, content, "utf8");
+    };
+    const read = (file) => fs.readFileSync(file, "utf8");
+    const tick = () => new Promise(resolve => setImmediate(resolve));
+
+    write(path.join(vaultRoot, "A.md"), "源 A 内容\n");
+    write(path.join(vaultRoot, "B.md"), "源 B 内容\n");
+    write(userTarget, "目标修改后内容\n");
+    write(path.join(userSkillsRoot, "skill-one", "SKILL.md"), "---\nname: skill-one\ndescription: 一号\n---\n");
+    const altSkillDir = path.join(fixtureDir, "alt-skill");
+    write(path.join(altSkillDir, "SKILL.md"), "---\nname: alt-skill\ndescription: 替代\n---\n");
+
+    const plugin = await loadPlugin({
+        workspace: { getActiveFile: () => null, getLeavesOfType: () => [] },
+        vault: {
+            adapter: { getBasePath: () => vaultRoot },
+            getAbstractFileByPath: relative => ({ path: relative }),
+            async modify(file, text) {
+                await fs.promises.writeFile(path.join(vaultRoot, file.path), text);
+            },
+        },
+    }, {
+        fixtureDir,
+        notices: [],
+        settings: {
+            userSource: "A.md",
+            targets: { Codex: "~/.codex/AGENTS.md" },
+            skillUserTargets: { Claude: "~/.claude/skills" },
+            skillProjectTargets: {},
+        },
+    });
+
+    const buttonIn = (rootEl, label) => {
+        for (const modal of plugin.body.children.slice(1).reverse()) {
+            const hit = findElements(modal, node => node.tag === "button" && node.textContent === label);
+            if (hit.length) return hit[0];
+        }
+        const inTab = findElements(rootEl, node => node.tag === "button" && node.textContent === label);
+        assert.ok(inTab.length > 0, label);
+        return inTab[0];
+    };
+
+    // 1. 打开指令同步后更改 userSource 为 B.md，旧卡片回收/分发/合并必须拒绝写向 B.md
+    await plugin.invoke("sync-instructions");
+    const instructionsHost = plugin.body.children[0].children[0].children[1].children[0];
+    plugin.plugin.settings.userSource = "B.md";
+    await buttonIn(instructionsHost, "用目标版本回收进 用户指令源笔记").onclick();
+    assert.equal(read(path.join(vaultRoot, "A.md")), "源 A 内容\n");
+    assert.equal(read(path.join(vaultRoot, "B.md")), "源 B 内容\n");
+    assert.ok(findElements(instructionsHost, n => n.textContent?.includes("源笔记设置已变化")).length > 0);
+    await buttonIn(instructionsHost, "行级对比合并…").onclick();
+    assert.ok(findElements(plugin.body, n => n.textContent?.includes("源笔记设置已变化")).length > 0);
+    buttonIn(instructionsHost, "关闭").onclick();
+
+    // 2. 分发技能后外部把链接改为指向另一技能，撤销须弹确认；取消则保留新链接
+    await plugin.invoke("manage-skills");
+    const skillsHost = plugin.body.children[0].children[0].children[1].children[1];
+    await buttonIn(skillsHost, "分发").onclick();
+    const linkPath = path.join(claudeUserSkills, "skill-one");
+    fs.unlinkSync(linkPath);
+    fs.symlinkSync(altSkillDir, linkPath, process.platform === "win32" ? "junction" : "dir");
+
+    const undoAsk = buttonIn(skillsHost, "撤销上次操作").onclick();
+    await tick();
+    assert.ok(findElements(plugin.body, n => n.textContent?.includes("以下目标在操作后又有修改")).length > 0);
+    buttonIn(skillsHost, "取消").onclick();
+    await undoAsk;
+    assert.ok(fs.lstatSync(linkPath).isSymbolicLink());
+    assert.match(fs.readlinkSync(linkPath), /alt-skill/);
+
+    // 3. 校验 create-test-vault 生成的 data.json 显式禁用用户级分发目标（不触碰真实 ~/.claude/skills）
+    const scriptText = fs.readFileSync(path.join(__dirname, "..", "scripts", "create-test-vault.mjs"), "utf8");
+    assert.match(scriptText, /skillUserTargets:\s*\{\s*\}/);
+
+    await plugin.closeWorkspace();
+});

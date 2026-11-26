@@ -47,6 +47,8 @@ await json(path.join(state, "instruction-projects.json"), { version: 1, projects
 await json(path.join(plugin, "data.json"), {
     userSource: "用户指令.md", workSource: "work.md", codeSource: "code.md",
     targets: { "样例 Agent": userTarget },
+    skillUserTargets: {},
+    skillProjectTargets: { "样例 Claude": ".claude/skills" },
     endpoint: "http://127.0.0.1:1/v1/chat/completions",
     credentialVariable: "AGENTS_MANAGER_FIXTURE_CREDENTIAL",
     model: "fixture", templates: {}, defaultTemplate: "",
