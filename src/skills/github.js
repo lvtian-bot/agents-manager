@@ -4,20 +4,36 @@ const { snapshotDirectoryFiles } = require("./links");
 
 const EXCLUDED_SEGMENTS = new Set([".git", ".github", ".gitignore", "node_modules"]);
 
+function decodeSegment(segment) {
+    try {
+        return decodeURIComponent(segment);
+    } catch {
+        throw new Error("无效的 GitHub URL 编码片段：" + segment);
+    }
+}
+
 function parseGitHubUrl(rawUrl) {
     const cleaned = String(rawUrl || "").trim().replace(/\/+$/, "");
-    const match = cleaned.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?(?:\/tree\/([^/]+)(?:\/(.*))?)?$/i);
+    const match = cleaned.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?(?:\/tree\/(.+))?$/i);
     if (!match) {
         throw new Error("无效的 GitHub 仓库地址（须使用 https://github.com/...）：" + rawUrl);
     }
-    const ref = match[3] || null;
-    const isCommitSha = Boolean(ref && /^[0-9a-f]{7,40}$/i.test(ref));
+    const owner = decodeSegment(match[1]);
+    const repo = decodeSegment(match[2]);
+    const rawTree = (match[3] || "").replace(/^\/+|\/+$/g, "");
+    if (!rawTree) {
+        return { owner, repo, branch: null, subpath: "", pinnedRef: null, treeSegments: [] };
+    }
+    const treeSegments = rawTree.split("/").filter(Boolean).map(decodeSegment);
+    const first = treeSegments[0];
+    const isCommitSha = Boolean(first && /^[0-9a-f]{7,40}$/i.test(first));
     return {
-        owner: match[1],
-        repo: match[2],
-        branch: ref && !isCommitSha ? ref : null,
-        subpath: (match[4] || "").replace(/^\/+|\/+$/g, ""),
-        pinnedRef: ref,
+        owner,
+        repo,
+        branch: isCommitSha ? null : first,
+        subpath: treeSegments.slice(1).join("/"),
+        pinnedRef: first,
+        treeSegments: isCommitSha ? [] : treeSegments,
     };
 }
 
@@ -83,14 +99,66 @@ function classifyRelPath(relPath) {
     return true;
 }
 
-async function checkGitHubUpdate(source, settings) {
-    const parsed = parseGitHubUrl(source.url);
-    const { headers } = buildHeaders(settings);
+async function fetchCommits(parsed, headers) {
     const params = new URLSearchParams({ per_page: "1" });
     if (parsed.branch) params.set("sha", parsed.branch);
     if (parsed.subpath) params.set("path", parsed.subpath);
     const url = `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/commits?${params.toString()}`;
-    const commits = await fetchJson(url, headers);
+    return fetchJson(url, headers);
+}
+
+async function resolveSlashRef(parsed, headers) {
+    if (!parsed.treeSegments || parsed.treeSegments.length <= 1) return null;
+    const fullRest = parsed.treeSegments.join("/");
+    const firstPrefix = parsed.treeSegments[0];
+    for (const kind of ["heads", "tags"]) {
+        const refUrl = `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/git/matching-refs/${kind}/${encodeURIComponent(firstPrefix)}`;
+        let refs;
+        try {
+            refs = await fetchJson(refUrl, headers);
+        } catch {
+            continue;
+        }
+        if (!Array.isArray(refs)) continue;
+        const prefix = `refs/${kind}/`;
+        let best = null;
+        for (const item of refs) {
+            const name = typeof item?.ref === "string" && item.ref.startsWith(prefix) ? item.ref.slice(prefix.length) : "";
+            if (!name || name === parsed.branch) continue;
+            if (fullRest === name || fullRest.startsWith(name + "/")) {
+                if (!best || name.length > best.length) best = name;
+            }
+        }
+        if (best) {
+            return {
+                ...parsed,
+                branch: best,
+                subpath: fullRest.length > best.length ? fullRest.slice(best.length + 1) : "",
+            };
+        }
+    }
+    return null;
+}
+
+async function checkGitHubUpdate(source, settings) {
+    let parsed = parseGitHubUrl(source.url);
+    const { headers } = buildHeaders(settings);
+    let commits = null;
+    let firstError = null;
+    try {
+        commits = await fetchCommits(parsed, headers);
+    } catch (error) {
+        firstError = error;
+    }
+    if ((!Array.isArray(commits) || !commits.length) && parsed.treeSegments.length > 1) {
+        const resolved = await resolveSlashRef(parsed, headers);
+        if (resolved) {
+            parsed = resolved;
+            commits = await fetchCommits(parsed, headers);
+            firstError = null;
+        }
+    }
+    if (firstError) throw firstError;
     if (!Array.isArray(commits) || !commits.length) {
         throw new Error("未在 GitHub 上游找到提交记录。");
     }
@@ -130,6 +198,11 @@ async function listEntriesViaContents(parsed, targetSha, dirPath, headers) {
             }
             if (subRel.split("/").some(seg => EXCLUDED_SEGMENTS.has(seg.toLowerCase()))) continue;
             entries.push(...await listEntriesViaContents(parsed, targetSha, item.path, headers));
+        } else if (item.type === "symlink") {
+            const rel = prefix ? (item.path.startsWith(prefix) ? item.path.slice(prefix.length) : "") : item.path;
+            if (classifyRelPath(rel)) {
+                throw new Error("上游技能包含不支持的软链接条目（" + rel + "），已取消更新。");
+            }
         } else if (item.type === "file") {
             const rel = prefix ? (item.path.startsWith(prefix) ? item.path.slice(prefix.length) : "") : item.path;
             if (classifyRelPath(rel)) {
@@ -156,10 +229,16 @@ async function listTreeEntries(parsed, targetSha, settings) {
     const prefix = parsed.subpath ? parsed.subpath + "/" : "";
     const entries = [];
     for (const item of treeData.tree || []) {
-        if (item.type !== "blob") continue;
+        if (item.type !== "blob" && item.type !== "commit") continue;
         if (prefix && !item.path.startsWith(prefix)) continue;
         const rel = prefix ? item.path.slice(prefix.length) : item.path;
         if (!classifyRelPath(rel)) continue;
+        if (item.mode === "120000") {
+            throw new Error("上游技能包含不支持的软链接条目（" + rel + "），已取消更新。");
+        }
+        if (item.type === "commit" || item.mode === "160000") {
+            throw new Error("上游技能包含不支持的子模块条目（" + rel + "），已取消更新。");
+        }
         entries.push({ rel, repoPath: item.path, sha: item.sha, mode: item.mode || "100644" });
     }
 

@@ -1567,3 +1567,131 @@ test("PR 第三轮审查回归：拒绝反斜杠逃逸路径、GitHub 撤销软�
 
     await plugin.closeWorkspace();
 });
+
+
+test("PR 复审回归：拒绝上游软链接条目并正确解析含斜杠分支名", async (t) => {
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-round4-"));
+    t.after(() => fs.rmSync(fixtureDir, { recursive: true, force: true }));
+
+    const vaultRoot = path.join(fixtureDir, "vault");
+    const syncDir = path.join(vaultRoot, ".obsidian", "plugins", "agents-manager", "sync");
+    const homeDir = path.join(fixtureDir, "home");
+    const userSkillsRoot = path.join(homeDir, ".agents", "skills");
+    const write = (file, content) => {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, content, "utf8");
+    };
+    const read = (file) => fs.readFileSync(file, "utf8");
+    const tick = () => new Promise(resolve => setImmediate(resolve));
+
+    const symlinkSkillDir = path.join(userSkillsRoot, "sym-skill");
+    const slashSkillDir = path.join(userSkillsRoot, "slash-skill");
+    write(path.join(symlinkSkillDir, "SKILL.md"), "---\nname: sym-skill\ndescription: 原版\n---\n原内容\n");
+    write(path.join(slashSkillDir, "SKILL.md"), "---\nname: slash-skill\ndescription: 原分支版\n---\n旧分支内容\n");
+    write(path.join(syncDir, "skills-sources.json"), JSON.stringify({
+        version: 1,
+        skills: {
+            "user/sym-skill": {
+                kind: "github",
+                url: "https://github.com/example/repo/tree/main/sym-skill",
+                commit: "1111111111111111111111111111111111111111",
+            },
+            "user/slash-skill": {
+                kind: "github",
+                url: "https://github.com/example/repo/tree/feature/new-skill/skills/demo",
+                commit: "1111111111111111111111111111111111111111",
+            },
+        },
+    }));
+
+    const plugin = await loadPlugin({
+        workspace: { getActiveFile: () => null, getLeavesOfType: () => [] },
+        vault: { adapter: { getBasePath: () => vaultRoot } },
+    }, {
+        fixtureDir,
+        notices: [],
+        settings: { skillUserTargets: {}, skillProjectTargets: {} },
+        async fetch(url) {
+            if (url.includes("/commits?") && url.includes("path=sym-skill")) {
+                return {
+                    ok: true,
+                    json: async () => [{ sha: "5555555555555555555555555555555555555555", commit: { message: "sym" } }],
+                };
+            }
+            if (url.includes("/git/trees/5555555555555555555555555555555555555555")) {
+                return {
+                    ok: true,
+                    json: async () => ({
+                        truncated: false,
+                        tree: [
+                            { type: "blob", path: "sym-skill/SKILL.md", sha: "s1", mode: "100644" },
+                            { type: "blob", path: "sym-skill/references/guide.md", sha: "s2", mode: "120000" },
+                        ],
+                    }),
+                };
+            }
+            if (url.includes("/commits?") && url.includes("sha=feature&")) {
+                return { ok: false, status: 404, text: async () => "Not Found" };
+            }
+            if (url.endsWith("/git/matching-refs/heads/feature")) {
+                return {
+                    ok: true,
+                    json: async () => [
+                        { ref: "refs/heads/feature" },
+                        { ref: "refs/heads/feature/new-skill" },
+                    ],
+                };
+            }
+            if (url.includes("/commits?") && url.includes("sha=feature%2Fnew-skill&path=skills%2Fdemo")) {
+                return {
+                    ok: true,
+                    json: async () => [{ sha: "6666666666666666666666666666666666666666", commit: { message: "slash branch" } }],
+                };
+            }
+            if (url.includes("/git/trees/6666666666666666666666666666666666666666")) {
+                return {
+                    ok: true,
+                    json: async () => ({
+                        truncated: false,
+                        tree: [
+                            { type: "blob", path: "skills/demo/SKILL.md", sha: "d1", mode: "100644" },
+                        ],
+                    }),
+                };
+            }
+            if (url.endsWith("/skills/demo/SKILL.md")) {
+                return { ok: true, arrayBuffer: async () => Buffer.from("---\nname: slash-skill\ndescription: 新分支版\n---\n新分支内容\n") };
+            }
+            assert.fail("未预期的请求：" + url);
+        },
+    });
+
+    const skillsHost = () => plugin.body.children[0].children[0].children[1].children[1];
+    const sButtons = (label) => {
+        for (const modal of plugin.body.children.slice(1).reverse()) {
+            const hit = findElements(modal, node => node.tag === "button" && node.textContent === label);
+            if (hit.length) return hit;
+        }
+        return findElements(skillsHost(), node => node.tag === "button" && node.textContent === label);
+    };
+
+    await plugin.invoke("manage-skills");
+
+    // 1. slash-skill 排在 sym-skill 之前（alphabetical）：先验证含斜杠分支可正确检查和更新
+    await sButtons("更新")[0].onclick();
+    assert.match(read(path.join(slashSkillDir, "SKILL.md")), /新分支内容/);
+    const sources = JSON.parse(read(path.join(syncDir, "skills-sources.json")));
+    assert.equal(sources.skills["user/slash-skill"].commit, "6666666666666666666666666666666666666666");
+
+    // 2. sym-skill 上游含 120000 软链接条目时拒绝更新，本地文件与基线均不变
+    const blockedSym = sButtons("更新")[1].onclick();
+    await tick();
+    assert.ok(findElements(plugin.body, n => n.textContent?.includes("不支持的软链接条目")).length > 0);
+    sButtons("关闭")[0].onclick();
+    await blockedSym;
+    assert.match(read(path.join(symlinkSkillDir, "SKILL.md")), /原内容/);
+    const afterSources = JSON.parse(read(path.join(syncDir, "skills-sources.json")));
+    assert.equal(afterSources.skills["user/sym-skill"].commit, "1111111111111111111111111111111111111111");
+
+    await plugin.closeWorkspace();
+});
