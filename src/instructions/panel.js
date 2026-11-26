@@ -1310,7 +1310,7 @@ function mountInstructions(plugin, host) {
             (conflicts.length ? "\n" + conflicts.map(target => target.name).join("、") : "");
         if (!await showConfirm("一键分发", summary, "确认分发")) return false;
         const fresh = await batchPlan();
-        const signature = list => JSON.stringify(list.map(t => [t.channel.id, t.path, t.currentHash, t.action, t.source.fullBody]));
+        const signature = list => JSON.stringify(list.map(t => [t.channel.id, t.sourceVaultPath, t.path, t.currentHash, t.action, t.source.fullBody]));
         if (signature(fresh) !== signature(targets)) throw new Error("待分发内容已变化，请重新确认。");
         const changes = changeSet();
         for (const target of fresh) planDistribution(changes, target);

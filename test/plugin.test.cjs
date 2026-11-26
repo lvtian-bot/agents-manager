@@ -1422,3 +1422,148 @@ test("PR 第二轮审查回归：链接改向撤销提示、源设置变更拦�
 
     await plugin.closeWorkspace();
 });
+
+
+test("PR 第三轮审查回归：拒绝反斜杠逃逸路径、GitHub 撤销软链接预检及整目录转换新增链接确认", async (t) => {
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-round3-"));
+    t.after(() => fs.rmSync(fixtureDir, { recursive: true, force: true }));
+
+    const vaultRoot = path.join(fixtureDir, "vault");
+    const syncDir = path.join(vaultRoot, ".obsidian", "plugins", "agents-manager", "sync");
+    const homeDir = path.join(fixtureDir, "home");
+    const userSkillsRoot = path.join(homeDir, ".agents", "skills");
+    const claudeUserSkills = path.join(homeDir, ".claude", "skills");
+    const outsideTarget = path.join(fixtureDir, "outside.txt");
+    const extraSkillDir = path.join(fixtureDir, "extra-skill");
+    const write = (file, content) => {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, content, "utf8");
+    };
+    const read = (file) => fs.readFileSync(file, "utf8");
+    const tick = () => new Promise(resolve => setImmediate(resolve));
+
+    write(outsideTarget, "外部安全文件\n");
+    write(path.join(extraSkillDir, "SKILL.md"), "---\nname: extra-skill\ndescription: 外部新增\n---\n");
+
+    const ghDir = path.join(userSkillsRoot, "gh-escape");
+    write(path.join(ghDir, "SKILL.md"), "---\nname: gh-escape\ndescription: 原版\n---\n原内容\n");
+    write(path.join(syncDir, "skills-sources.json"), JSON.stringify({
+        version: 1,
+        skills: {
+            "user/gh-escape": {
+                kind: "github",
+                url: "https://github.com/example/repo/tree/main/gh-escape",
+                commit: "1111111111111111111111111111111111111111",
+            },
+        },
+    }));
+
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    fs.mkdirSync(path.dirname(claudeUserSkills), { recursive: true });
+    fs.symlinkSync(userSkillsRoot, claudeUserSkills, linkType);
+
+    let badTree = true;
+    const plugin = await loadPlugin({
+        workspace: { getActiveFile: () => null, getLeavesOfType: () => [] },
+        vault: { adapter: { getBasePath: () => vaultRoot } },
+    }, {
+        fixtureDir,
+        notices: [],
+        settings: {
+            skillUserTargets: { Claude: "~/.claude/skills" },
+            skillProjectTargets: {},
+        },
+        async fetch(url) {
+            if (url.includes("/commits?")) {
+                return {
+                    ok: true,
+                    json: async () => [{
+                        sha: "4444444444444444444444444444444444444444",
+                        commit: { message: "test", committer: { date: "2026-11-26T15:30:00Z" } },
+                    }],
+                };
+            }
+            if (url.includes("/git/trees/")) {
+                return {
+                    ok: true,
+                    json: async () => ({
+                        truncated: false,
+                        tree: badTree
+                            ? [
+                                { type: "blob", path: "gh-escape/SKILL.md", sha: "s1", mode: "100644" },
+                                { type: "blob", path: "gh-escape/..\\..\\outside.txt", sha: "s2", mode: "100644" },
+                            ]
+                            : [
+                                { type: "blob", path: "gh-escape/SKILL.md", sha: "s1", mode: "100644" },
+                            ],
+                    }),
+                };
+            }
+            if (url.endsWith("/gh-escape/SKILL.md")) {
+                return { ok: true, arrayBuffer: async () => Buffer.from("---\nname: gh-escape\ndescription: 新版\n---\n新内容\n") };
+            }
+            assert.fail("不应下载不安全路径或未预期文件：" + url);
+        },
+    });
+
+    const skillsHost = () => plugin.body.children[0].children[0].children[1].children[1];
+    const sButton = (label) => {
+        for (const modal of plugin.body.children.slice(1).reverse()) {
+            const hit = findElements(modal, node => node.tag === "button" && node.textContent === label);
+            if (hit.length) return hit[0];
+        }
+        const inTab = findElements(skillsHost(), node => node.tag === "button" && node.textContent === label);
+        assert.ok(inTab.length > 0, label);
+        return inTab[0];
+    };
+
+    await plugin.invoke("manage-skills");
+
+    // 1. 拒绝含 Windows 反斜杠逃逸路径的上游更新，外部文件不受影响
+    const blockedEscape = sButton("更新").onclick();
+    await tick();
+    assert.ok(findElements(plugin.body, n => n.textContent?.includes("上游包含不安全的文件路径")).length > 0);
+    sButton("关闭").onclick();
+    await blockedEscape;
+    assert.equal(read(outsideTarget), "外部安全文件\n");
+    assert.equal(fs.existsSync(path.join(syncDir, "skills-pending-operation.json")), false);
+
+    // 2. 正常更新后，若目录内被外部放入软链接，撤销前预检拒绝且不残留 pending 文件
+    badTree = false;
+    await sButton("更新").onclick();
+    assert.match(read(path.join(ghDir, "SKILL.md")), /新内容/);
+    const nestedLink = path.join(ghDir, "extra-link");
+    fs.symlinkSync(extraSkillDir, nestedLink, linkType);
+    const blockedUndo = sButton("撤销上次操作").onclick();
+    await tick();
+    assert.ok(findElements(plugin.body, n => n.textContent?.includes("技能目录内包含软链接")).length > 0);
+    sButton("关闭").onclick();
+    await blockedUndo;
+    assert.equal(fs.existsSync(path.join(syncDir, "skills-pending-operation.json")), false);
+    fs.unlinkSync(nestedLink);
+
+    // 3. 整目录转为逐个链接后新增了其他工具的技能链接，撤销须提示确认；取消保留，确认后恢复整目录链接
+    const convertAsk = sButton("转为逐个链接").onclick();
+    await tick();
+    sButton("确认转换").onclick();
+    await convertAsk;
+    await tick();
+    const addedLink = path.join(claudeUserSkills, "extra-skill");
+    fs.symlinkSync(extraSkillDir, addedLink, linkType);
+
+    const undoCancel = sButton("撤销上次操作").onclick();
+    await tick();
+    assert.ok(findElements(plugin.body, n => n.textContent?.includes("以下目标在操作后又有修改")).length > 0);
+    sButton("取消").onclick();
+    await undoCancel;
+    assert.ok(fs.lstatSync(addedLink).isSymbolicLink());
+
+    const undoConfirm = sButton("撤销上次操作").onclick();
+    await tick();
+    sButton("继续撤销").onclick();
+    await undoConfirm;
+    await tick();
+    assert.ok(fs.lstatSync(claudeUserSkills).isSymbolicLink());
+
+    await plugin.closeWorkspace();
+});

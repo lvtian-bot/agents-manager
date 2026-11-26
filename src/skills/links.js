@@ -211,42 +211,59 @@ function assertNoSymlinksForSnapshot(rootDir) {
     walk(rootDir, "");
 }
 
+function resolveSafeChildPath(rootDir, rel) {
+    if (typeof rel !== "string" || !rel || /[\\:\0-\x1f]/.test(rel)) {
+        throw new Error("不安全的相对文件路径：" + rel);
+    }
+    const segments = rel.split("/");
+    if (segments.some(seg => !seg || seg === "." || seg === "..")) {
+        throw new Error("不安全的相对文件路径：" + rel);
+    }
+    const rootAbs = path.resolve(rootDir);
+    const destAbs = path.resolve(rootAbs, ...segments);
+    const relative = path.relative(rootAbs, destAbs);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+        throw new Error("文件路径超出技能根目录范围：" + rel);
+    }
+    return { parts: segments, destAbs };
+}
+
 function writeSnapshotFiles(rootDir, files, expectedOldFiles) {
+    const resolvedFiles = files.map(item => ({ item, resolved: resolveSafeChildPath(rootDir, item.rel) }));
+    const resolvedOld = expectedOldFiles.map(old => ({ old, resolved: resolveSafeChildPath(rootDir, old.rel) }));
     assertNoSymlinksForSnapshot(rootDir);
     const nextRels = new Set(files.map(item => item.rel));
-    for (const old of expectedOldFiles) {
+    for (const { old, resolved } of resolvedOld) {
         if (!nextRels.has(old.rel)) {
-            const target = path.join(rootDir, ...old.rel.split("/"));
-            const stat = fs.lstatSync(target, { throwIfNoEntry: false });
-            if (stat && stat.isFile()) fs.unlinkSync(target);
+            const stat = fs.lstatSync(resolved.destAbs, { throwIfNoEntry: false });
+            if (stat && stat.isFile()) fs.unlinkSync(resolved.destAbs);
         }
     }
     cleanEmptySubdirs(rootDir);
 
-    fs.mkdirSync(rootDir, { recursive: true });
-    for (const item of files) {
-        const parts = item.rel.split("/");
-        let current = rootDir;
-        for (let i = 0; i < parts.length - 1; i++) {
-            current = path.join(current, parts[i]);
+    const rootAbs = path.resolve(rootDir);
+    fs.mkdirSync(rootAbs, { recursive: true });
+    for (const { item, resolved } of resolvedFiles) {
+        let current = rootAbs;
+        for (let i = 0; i < resolved.parts.length - 1; i++) {
+            current = path.join(current, resolved.parts[i]);
             const ancStat = fs.lstatSync(current, { throwIfNoEntry: false });
             if (ancStat && !ancStat.isDirectory()) {
                 fs.unlinkSync(current);
             }
         }
-        const dest = path.join(rootDir, ...parts);
-        const destStat = fs.lstatSync(dest, { throwIfNoEntry: false });
+        const destStat = fs.lstatSync(resolved.destAbs, { throwIfNoEntry: false });
         if (destStat && destStat.isDirectory()) {
-            fs.rmSync(dest, { recursive: true, force: true });
+            fs.rmSync(resolved.destAbs, { recursive: true, force: true });
         }
-        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.mkdirSync(path.dirname(resolved.destAbs), { recursive: true });
         const buf = Buffer.from(item.base64, "base64");
-        fs.writeFileSync(dest, buf);
+        fs.writeFileSync(resolved.destAbs, buf);
         if (typeof item.mode === "number") {
-            fs.chmodSync(dest, item.mode);
+            fs.chmodSync(resolved.destAbs, item.mode);
         }
     }
-    cleanEmptySubdirs(rootDir);
+    cleanEmptySubdirs(rootAbs);
 }
 
 function cleanEmptySubdirs(rootDir) {
@@ -383,9 +400,22 @@ function createSkillsHistory(stateRoot) {
                 throw new Error("目标路径不是目录，无法恢复整目录链接：" + op.targetDir);
             }
             const entries = fs.readdirSync(op.targetDir, { withFileTypes: true });
+            const expected = new Map(op.skills.map(skill => [
+                process.platform === "win32" ? skill.name.toLowerCase() : skill.name,
+                skill,
+            ]));
             for (const entry of entries) {
+                const fullPath = path.join(op.targetDir, entry.name);
                 if (!entry.isSymbolicLink()) {
                     throw new Error("目标目录内存在非软链接的文件或目录（" + entry.name + "），已停止撤销以免误删。");
+                }
+                if (!forceConfirm) {
+                    const key = process.platform === "win32" ? entry.name.toLowerCase() : entry.name;
+                    const recorded = expected.get(key);
+                    const info = inspectPath(fullPath);
+                    if (!recorded || canonicalPath(info.resolvedTarget) !== canonicalPath(recorded.targetPath)) {
+                        throw new Error("目标目录内存在新增或已改向的软链接（" + entry.name + "），请确认后再撤销。");
+                    }
                 }
             }
             for (const entry of entries) {
@@ -421,10 +451,21 @@ function createSkillsHistory(stateRoot) {
             const changed = [];
             const dirInfo = inspectPath(op.targetDir);
             if (dirInfo.kind === "directory") {
-                for (const skill of op.skills) {
-                    const info = inspectPath(skill.linkPath);
-                    if (info.kind === "symlink" && canonicalPath(info.resolvedTarget) !== canonicalPath(skill.targetPath)) {
-                        changed.push(skill.linkPath);
+                const expected = new Map(op.skills.map(skill => [
+                    process.platform === "win32" ? skill.name.toLowerCase() : skill.name,
+                    skill,
+                ]));
+                for (const entry of fs.readdirSync(op.targetDir, { withFileTypes: true })) {
+                    const fullPath = path.join(op.targetDir, entry.name);
+                    const key = process.platform === "win32" ? entry.name.toLowerCase() : entry.name;
+                    const recorded = expected.get(key);
+                    if (!recorded) {
+                        changed.push(fullPath);
+                        continue;
+                    }
+                    const info = inspectPath(fullPath);
+                    if (info.kind === "symlink" && canonicalPath(info.resolvedTarget) !== canonicalPath(recorded.targetPath)) {
+                        changed.push(fullPath);
                     }
                 }
             }
@@ -501,6 +542,10 @@ function createSkillsHistory(stateRoot) {
                     throw new Error("目标目录内存在非软链接的文件或目录（" + entry.name + "），已停止撤销以免误删。");
                 }
             }
+            return;
+        }
+        if (op.type === "github-update") {
+            assertNoSymlinksForSnapshot(op.skillDir);
         }
     }
 

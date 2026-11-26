@@ -356,7 +356,11 @@ function mountSkills(plugin, host) {
                     if (!await showConfirm("转为逐个链接", msg, "确认转换")) return;
                     convertBtn.disabled = true;
                     try {
-                        await exclusive(() => convertWholeDirToPerSkill(history, scope, hState));
+                        await exclusive(() => {
+                            const freshScope = loadScopes().find(item => item.key === scope.key) || scope;
+                            const freshHarness = freshScope.harnessStates.find(item => item.name === hState.name) || hState;
+                            return convertWholeDirToPerSkill(history, freshScope, freshHarness);
+                        });
                         new Notice(hState.name + " 已转为逐个链接");
                         await safeRefresh();
                     } catch (error) {
@@ -752,7 +756,7 @@ function mountSkills(plugin, host) {
     bulkButton.onclick = async () => {
         if (!stateRoot) return;
         try {
-            const result = await exclusive(() => distributeAllSkills(history, scopes));
+            const result = await exclusive(() => distributeAllSkills(history, loadScopes()));
             if (result.createdCount > 0) {
                 new Notice("一键分发完成：新建 " + result.createdCount + " 个链接" +
                     (result.skippedWholeDir ? "（跳过 " + result.skippedWholeDir + " 个整目录链接）" : ""));

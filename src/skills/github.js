@@ -6,9 +6,9 @@ const EXCLUDED_SEGMENTS = new Set([".git", ".github", ".gitignore", "node_module
 
 function parseGitHubUrl(rawUrl) {
     const cleaned = String(rawUrl || "").trim().replace(/\/+$/, "");
-    const match = cleaned.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?(?:\/tree\/([^/]+)(?:\/(.*))?)?$/i);
+    const match = cleaned.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?(?:\/tree\/([^/]+)(?:\/(.*))?)?$/i);
     if (!match) {
-        throw new Error("无效的 GitHub 仓库地址：" + rawUrl);
+        throw new Error("无效的 GitHub 仓库地址（须使用 https://github.com/...）：" + rawUrl);
     }
     const ref = match[3] || null;
     const isCommitSha = Boolean(ref && /^[0-9a-f]{7,40}$/i.test(ref));
@@ -70,13 +70,16 @@ function encodeUriPath(repoPath) {
     return repoPath.split("/").map(encodeURIComponent).join("/");
 }
 
-function isIncludedRelPath(relPath) {
-    if (!relPath) return false;
-    const segments = relPath.split("/");
-    if (segments.some(seg => !seg || seg === "." || seg === ".." || EXCLUDED_SEGMENTS.has(seg))) {
-        return false;
+function classifyRelPath(relPath) {
+    if (typeof relPath !== "string" || !relPath || /[\\:\0-\x1f]/.test(relPath)) {
+        throw new Error("上游包含不安全的文件路径：" + relPath);
     }
-    if (relPath === "agents/openai.yaml") return false;
+    const segments = relPath.split("/");
+    if (segments.some(seg => !seg || seg === "." || seg === "..")) {
+        throw new Error("上游包含不安全的文件路径：" + relPath);
+    }
+    if (segments.some(seg => EXCLUDED_SEGMENTS.has(seg.toLowerCase()))) return false;
+    if (relPath.toLowerCase() === "agents/openai.yaml") return false;
     return true;
 }
 
@@ -122,11 +125,14 @@ async function listEntriesViaContents(parsed, targetSha, dirPath, headers) {
     for (const item of list) {
         if (item.type === "dir") {
             const subRel = prefix && item.path.startsWith(prefix) ? item.path.slice(prefix.length) : item.path;
-            if (subRel.split("/").some(seg => EXCLUDED_SEGMENTS.has(seg))) continue;
+            if (/[\\:\0-\x1f]/.test(subRel) || subRel.split("/").some(seg => !seg || seg === "." || seg === "..")) {
+                throw new Error("上游包含不安全的文件路径：" + subRel);
+            }
+            if (subRel.split("/").some(seg => EXCLUDED_SEGMENTS.has(seg.toLowerCase()))) continue;
             entries.push(...await listEntriesViaContents(parsed, targetSha, item.path, headers));
         } else if (item.type === "file") {
             const rel = prefix ? (item.path.startsWith(prefix) ? item.path.slice(prefix.length) : "") : item.path;
-            if (isIncludedRelPath(rel)) {
+            if (classifyRelPath(rel)) {
                 entries.push({ rel, repoPath: item.path, sha: item.sha, mode: item.mode || "100644" });
             }
         }
@@ -153,7 +159,7 @@ async function listTreeEntries(parsed, targetSha, settings) {
         if (item.type !== "blob") continue;
         if (prefix && !item.path.startsWith(prefix)) continue;
         const rel = prefix ? item.path.slice(prefix.length) : item.path;
-        if (!isIncludedRelPath(rel)) continue;
+        if (!classifyRelPath(rel)) continue;
         entries.push({ rel, repoPath: item.path, sha: item.sha, mode: item.mode || "100644" });
     }
 
