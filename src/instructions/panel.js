@@ -3,6 +3,7 @@ var path = require("path");
 var os = require("os");
 var crypto = require("crypto");
 const { Notice, Menu } = require("obsidian");
+const { createWorkspaceToolbar, createWorkspaceFooter } = require("../workspace-controls");
 const { syncDirectory, readText, replaceText, createHistory } = require("./storage");
 const { normalizeNewlines, extractInstructionBody, parseWorkStructure, rebuildDocument, computeLineDiff, composeMergedBody } = require("./documents");
 const { harnessTargets, NotePicker, vaultPath } = require("../settings");
@@ -1441,15 +1442,10 @@ function mountInstructions(plugin, host) {
 
     host.empty?.();
     var content = el("div", "flex:1;overflow:auto;padding:16px 18px;min-height:0;");
-    var footer = el("div",
-        "display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 18px;" +
-        "border-top:1px solid var(--background-modifier-border);flex-shrink:0;");
     host.appendChild(content);
-    host.appendChild(footer);
-
-    content.appendChild(el("div",
-        "margin-bottom:14px;line-height:1.5;color:var(--text-muted);font-size:var(--am-font-secondary);",
-        "用户级指令同步整篇正文。Work 和 Code 项目只同步第一个一级标题及其内容，到第二个一级标题前为止。"));
+    const { tabs: tabBar, actions: listActions } = createWorkspaceToolbar(content);
+    const { last, record, actions } = createWorkspaceFooter(host,
+        "用户级指令同步整篇正文。Work 和 Code 项目只同步第一个一级标题及其内容，到第二个一级标题前为止。");
 
     var TAB_BASE_STYLE =
         "flex:1 1 auto;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:var(--am-font-control);box-shadow:none;" +
@@ -1461,6 +1457,7 @@ function mountInstructions(plugin, host) {
 
     function renderInitError(error) {
         var nextArea = el("div");
+        tabBar.empty();
         appendCard(nextArea, {
             title: "指令分发失败",
             pathText: "",
@@ -1523,7 +1520,7 @@ function mountInstructions(plugin, host) {
             });
         });
 
-        var tabBar = el("div", "display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;");
+        tabBar.empty();
         var tabs = {};
         var panes = {};
 
@@ -1575,7 +1572,6 @@ function mountInstructions(plugin, host) {
             settlePending(key, wasPending);
         };
 
-        nextArea.appendChild(tabBar);
         paneDefs.forEach(function (def) {
             tabs[def.key] = document.createElement("button");
             panes[def.key] = document.createElement("div");
@@ -1673,7 +1669,7 @@ function mountInstructions(plugin, host) {
     const refreshButton = el("button", "font-size:var(--am-font-control);", "刷新");
     const undo = el("button", "font-size:var(--am-font-control);", "撤销上次操作");
     const bulk = el("button", "font-size:var(--am-font-control);");
-    const last = el("span", "margin-right:auto;align-self:center;font-size:var(--am-font-secondary);color:var(--text-muted);");
+    listActions.appendChild(refreshButton);
     refreshHistory = () => {
         const operation = history ? history.latest() : null;
         last.textContent = operation ? "上次操作：" + operation.label : "";
@@ -1698,10 +1694,8 @@ function mountInstructions(plugin, host) {
         } catch (error) { showMessage("撤销失败", error.message); }
     };
     bulk.hidden = true;
-    footer.appendChild(last);
-    footer.appendChild(refreshButton);
-    footer.appendChild(undo);
-    footer.appendChild(bulk);
+    record.appendChild(undo);
+    actions.appendChild(bulk);
 
     // 轻量确认弹窗：确认 resolve(true)，取消或关闭 resolve(false)。
     // 确认按钮先落定结果再关闭，onClose 的 resolve(false) 不会覆盖已落定的值。

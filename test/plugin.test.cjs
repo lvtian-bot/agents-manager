@@ -21,6 +21,11 @@ class Element {
         child.parent = this;
     }
 
+    prepend(child) {
+        this.children.unshift(child);
+        child.parent = this;
+    }
+
     remove() {
         const siblings = this.parent.children;
         siblings.splice(siblings.indexOf(this), 1);
@@ -208,7 +213,8 @@ async function loadPlugin(app, options = {}) {
                     }
                     showAtPosition() { options.menu(this.items); }
                 }
-                return { Notice, Plugin, Modal, ItemView, Setting, Menu, ToggleComponent, PluginSettingTab: class {}, FuzzySuggestModal: class {
+                const setIcon = (element, icon) => element.setAttribute("data-icon", icon);
+                return { Notice, Plugin, Modal, ItemView, Setting, Menu, ToggleComponent, setIcon, PluginSettingTab: class {}, FuzzySuggestModal: class {
                     constructor(app) { this.app = app; }
                     open() { options.pick(this); }
                     onClose() {}
@@ -1044,7 +1050,7 @@ test("同步面板操作后原地刷新保留标签页与滚动位置，并支�
     assert.equal(read(targetB), v1FromA + "\n" + bodyB);
     assertStayedInWorkTab("第二级：Work 类型");
 
-    // 3. 外部改动模板与项目A后点击底栏「刷新」按钮。
+    // 3. 外部改动模板与项目A后点击列表顶部的「刷新」按钮。
     const v2 = "# 工作规范\n模板二次更新";
     const v2FromA = "# 工作规范\n项目A二次更新";
     write(workSourcePath, v2 + "\n" + templateTail);
@@ -1633,9 +1639,20 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.equal(ribbon.title, leaf.view.getDisplayText());
     assert.equal(ribbon.icon, leaf.view.getIcon());
     assert.equal(button("指令同步").getAttribute("aria-selected"), "true");
+    assert.equal(button("指令同步").children[0].getAttribute("data-icon"), "refresh-cw");
+    assert.match(button("指令同步").style.cssText, /border-bottom-color:var\(--text-accent\)/);
+    const [instructionsContent, instructionsFooter] = leaf.view.hosts.instructions.children;
+    assert.equal(findElements(instructionsContent, n => n.textContent.startsWith("用户级指令同步整篇正文")).length, 0);
+    assert.match(instructionsFooter.children[0].children[1].textContent, /^用户级指令同步整篇正文/);
+    const [instructionRecord] = instructionsFooter.children[0].children;
+    assert.equal(instructionRecord.children[1].textContent, "撤销上次操作");
+    assert.deepEqual(instructionsContent.children[0].children[1].children.map(n => n.textContent), ["刷新"]);
+    assert.equal(instructionsFooter.children[1].children.length, 1);
 
     await plugin.invoke("manage-skills");
     assert.equal(button("技能管理").getAttribute("aria-selected"), "true");
+    assert.equal(button("技能管理").children[0].getAttribute("data-icon"), "library");
+    assert.doesNotMatch(button("指令同步").style.cssText, /border-bottom-color/);
     workspace.setActiveLeaf(workspace.getLeaf("tab"));
     await ribbon.callback();
     assert.deepEqual(workspace.getLeavesOfType("agents-manager-workspace"), [leaf]);
@@ -1672,6 +1689,39 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.ok(skillsTextIncludes("目录名不符合小写 kebab-case").length > 0);
     assert.ok(skillsTextIncludes("缺少 description").length > 0);
     assert.ok(skillsTextIncludes("包含 agents/openai.yaml").length > 0);
+    const [skillContent, skillFooter] = skillsHost.children;
+    const [operationInfo, skillActions] = skillFooter.children;
+    const [skillRecord, skillExplanation] = operationInfo.children;
+    assert.equal(findElements(skillContent, n => n.textContent.startsWith("技能来自用户主目录")).length, 0);
+    assert.match(skillExplanation.textContent, /^技能来自用户主目录/);
+    assert.deepEqual(skillContent.children[0].children[1].children.map(n => n.textContent), ["刷新", "检查更新"]);
+    assert.deepEqual(skillActions.children.map(n => n.textContent), ["一键分发"]);
+    assert.equal(skillRecord.children[1], sButton("撤销上次操作"));
+    const warning = sButton("检查异常（4）");
+    assert.equal(warning.parent.children[0].textContent, "Bad_Name");
+    const issueDetails = skillsTextIncludes("缺少 description")[0];
+    assert.equal(issueDetails.hidden, true);
+    warning.onclick();
+    assert.equal(warning.getAttribute("aria-expanded"), "true");
+    assert.equal(issueDetails.hidden, false);
+    warning.onclick();
+    assert.equal(warning.getAttribute("aria-expanded"), "false");
+    assert.equal(issueDetails.hidden, true);
+    const [userTable, projectTable] = findElements(skillsHost, node => node.tag === "table");
+    assert.match(userTable.style.cssText, /table-layout:fixed/);
+    assert.equal(userTable.style.cssText, projectTable.style.cssText);
+    const projectHeaders = findElements(projectTable, n => n.tag === "thead")[0].children[0].children;
+    assert.equal(projectHeaders[3].getAttribute("aria-hidden"), "true");
+    assert.equal(projectHeaders[3].colSpan, 1);
+    assert.equal(projectHeaders[4].textContent, "Claude");
+    assert.match(projectHeaders[4].style.cssText, /text-align:right/);
+    const projectRow = findElements(projectTable, n => n.tag === "tbody")[0].children[0];
+    assert.equal(projectRow.children[3].getAttribute("aria-hidden"), "true");
+    assert.match(projectRow.children[4].children[0].style.cssText, /justify-content:flex-end/);
+    sButton("项目A（1）").onclick();
+    assert.equal(userTable.parent.parent.style.display, "none");
+    assert.equal(projectTable.parent.parent.style.display, "");
+    sButton("用户级技能（4）").onclick();
 
     // 3. 自建技能编辑与撤销
     sButton("编辑").onclick();
@@ -1691,6 +1741,10 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.ok(skillsTextIncludes("失效链接（1）").length > 0);
     await sButton("清理").onclick();
     assert.equal(fs.lstatSync(path.join(customToolUserSkills, "old-removed"), { throwIfNoEntry: false }), undefined);
+    assert.match(skillRecord.children[0].textContent, /^上次操作：清理失效链接 old-removed/);
+    assert.equal(instructionRecord.children[0].textContent, "");
+    assert.equal(instructionRecord.children[1].disabled, true);
+    assert.match(skillExplanation.textContent, /^技能来自用户主目录/);
 
     const linkSwitch = (name, tool) => findElements(skillsHost, node =>
         node.getAttribute("role") === "switch" && node.getAttribute("aria-label") === name + " 链接到 " + tool)[0];
@@ -1781,7 +1835,15 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.equal(typeFor("gog").value, "github");
     assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "编辑").length, 4);
     assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "查看").length, 5);
-    assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "修改链接").length, 1);
+    const sourceButtons = findElements(skillsHost, node => node.tag === "button" && node.getAttribute("aria-label") === "修改链接");
+    assert.equal(sourceButtons.length, 1);
+    const [sourceButton] = sourceButtons;
+    assert.equal(sourceButton.textContent, "");
+    assert.equal(sourceButton.getAttribute("data-icon"), "pencil");
+    assert.equal(sourceButton.title, "修改链接");
+    sourceButton.onclick();
+    assert.ok(findElements(plugin.body, node => node.tag === "h2" && node.textContent === "修改链接").length > 0);
+    sButton("取消").onclick();
     assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "设置来源").length, 0);
     const gogRow = typeFor("gog").parent.parent;
     assert.equal(gogRow.children.length, 5);

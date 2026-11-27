@@ -1,5 +1,6 @@
 const fs = require("fs");
-const { Menu, Notice, ToggleComponent } = require("obsidian");
+const { Menu, Notice, setIcon, ToggleComponent } = require("obsidian");
+const { createWorkspaceToolbar, createWorkspaceFooter } = require("../workspace-controls");
 const { readText, replaceText } = require("../instructions/storage");
 const { skillUserPath, skillProjectPath, required } = require("../settings");
 const {
@@ -36,6 +37,11 @@ const SKILL_CELL_STYLE =
     "vertical-align:middle;font-size:var(--am-font-control);";
 const SKILL_ACTION_STYLE =
     "font-size:var(--am-font-control);padding:3px 7px;min-height:28px;height:auto;white-space:nowrap;";
+const SKILL_NAME_MIN_WIDTH = 188;
+const SKILL_TYPE_WIDTH = 116;
+const SKILL_ACTION_WIDTH = 152;
+const SKILL_HARNESS_WIDTH = 120;
+const TRUNCATE_STYLE = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
 
 function el(tag, cssText, textContent) {
     const node = document.createElement(tag);
@@ -57,16 +63,11 @@ function mountSkills(plugin, host) {
     let manualCheckRunning = false;
 
     host.empty?.();
-    const content = el("div", "flex:1;overflow:auto;padding:16px 18px;min-height:0;");
-    const footer = el("div",
-        "display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 18px;" +
-        "border-top:1px solid var(--background-modifier-border);flex-shrink:0;");
+    const content = el("div", "flex:1;overflow:auto;scrollbar-gutter:stable;padding:16px 18px;min-height:0;");
     host.appendChild(content);
-    host.appendChild(footer);
-
-    content.appendChild(el("div",
-        "margin-bottom:14px;line-height:1.5;color:var(--text-muted);font-size:var(--am-font-secondary);",
-        "技能来自用户主目录、当前 Obsidian 库和已登记项目下的 .agents/skills。每个技能放在单独的子目录中，目录内须有 SKILL.md。"));
+    const { tabs: tabBar, actions: listActions } = createWorkspaceToolbar(content);
+    const { last, record, actions } = createWorkspaceFooter(host,
+        "技能来自用户主目录、当前 Obsidian 库和已登记项目下的 .agents/skills。每个技能放在单独的子目录中，目录内须有 SKILL.md。");
 
     function createModal(options) {
         const dialog = plugin.openDialog(options.title, options.onClose);
@@ -558,13 +559,14 @@ function mountSkills(plugin, host) {
                 "display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 12px;" +
                 "border:1px solid var(--background-modifier-border);border-radius:6px;" +
                 "background:var(--background-secondary);");
-            const info = el("div", "flex:1;min-width:220px;");
+            const info = el("div", "flex:1;min-width:0;");
             info.appendChild(el("div", "font-weight:600;", hState.name));
-            info.appendChild(el("div",
-                "font-family:var(--font-monospace);font-size:var(--am-font-secondary);color:var(--text-muted);word-break:break-all;",
-                hState.targetDir));
+            const targetPath = el("div", TRUNCATE_STYLE +
+                "font-family:var(--font-monospace);font-size:var(--am-font-secondary);color:var(--text-muted);", hState.targetDir);
+            targetPath.title = hState.targetDir;
+            info.appendChild(targetPath);
 
-            const statusEl = el("span", "font-size:var(--am-font-control);");
+            const statusEl = el("span", TRUNCATE_STYLE + "max-width:55%;font-size:var(--am-font-control);");
             row.appendChild(info);
 
             if (hState.status === "whole-dir-linked") {
@@ -595,7 +597,7 @@ function mountSkills(plugin, host) {
                 row.appendChild(convertBtn);
             } else if (hState.status === "dir-conflict") {
                 statusEl.style.color = "var(--text-error)";
-                statusEl.textContent = "目录冲突：" + hState.reason;
+                statusEl.title = statusEl.textContent = "目录冲突：" + hState.reason;
                 row.appendChild(statusEl);
             } else {
                 let linkedCount = 0;
@@ -611,7 +613,7 @@ function mountSkills(plugin, host) {
                 if (conflictCount) parts.push(conflictCount + " 冲突");
                 if (brokenCount) parts.push(brokenCount + " 失效");
                 statusEl.style.color = (conflictCount || brokenCount) ? "var(--text-warning)" : "var(--text-muted)";
-                statusEl.textContent = parts.join(" · ");
+                statusEl.title = statusEl.textContent = parts.join(" · ");
                 row.appendChild(statusEl);
             }
             box.appendChild(row);
@@ -629,7 +631,7 @@ function mountSkills(plugin, host) {
         if (!items.length) return;
 
         const card = el("div",
-            "border:1px solid var(--background-modifier-border);border-radius:6px;padding:12px 14px;margin-bottom:12px;");
+            "border:1px solid var(--background-modifier-border);border-radius:6px;padding:12px 14px;margin-top:12px;");
         card.appendChild(el("div", "font-weight:600;margin-bottom:8px;color:var(--text-warning);",
             "失效链接（" + items.length + "）"));
         for (const item of items) {
@@ -685,42 +687,73 @@ function mountSkills(plugin, host) {
         });
     }
 
-    function renderSkillRow(parent, scope, skill) {
+    function appendEmptyHarnessCells(row, count, tag) {
+        if (!count) return;
+        const spacer = el(tag, SKILL_CELL_STYLE);
+        spacer.colSpan = count;
+        spacer.setAttribute("aria-hidden", "true");
+        row.appendChild(spacer);
+    }
+
+    function renderSkillRow(parent, scope, skill, emptyHarnessColumns) {
         const row = el("tr");
-        const info = el("th", SKILL_CELL_STYLE + "text-align:left;font-weight:400;min-width:140px;");
+        const info = el("th", SKILL_CELL_STYLE + "text-align:left;font-weight:400;");
         info.setAttribute("scope", "row");
-        info.appendChild(el("div", "font-weight:600;font-size:var(--am-font-primary);overflow-wrap:anywhere;", skill.name));
+        const titleLine = el("div", "display:flex;align-items:baseline;gap:8px;line-height:1.5;");
+        const name = el("span", TRUNCATE_STYLE + "font-weight:600;font-size:var(--am-font-primary);", skill.name);
+        name.title = skill.name;
+        titleLine.appendChild(name);
+        info.appendChild(titleLine);
+
+        const descriptionLine = el("div",
+            "display:flex;align-items:baseline;gap:8px;line-height:1.5;font-size:var(--am-font-secondary);");
         const summary = skill.description || "（无 description 说明）";
-        const description = el("div",
-            "max-width:30ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" +
-            "font-size:var(--am-font-secondary);color:var(--text-muted);", summary);
+        const description = el("span", TRUNCATE_STYLE + "color:var(--text-muted);", summary);
         description.title = summary;
-        info.appendChild(description);
+        descriptionLine.appendChild(description);
+        info.appendChild(descriptionLine);
+
         if (skill.issues.length) {
-            const issues = skill.issues.join("；");
-            const warning = el("details", "color:var(--text-error);");
-            warning.appendChild(el("summary", "cursor:pointer;", "检查异常（" + skill.issues.length + "）"));
-            warning.appendChild(el("div", "max-width:30ch;overflow-wrap:anywhere;", "问题：" + issues));
-            info.appendChild(warning);
+            const warning = el("button",
+                "display:inline-flex;align-items:center;gap:4px;flex-shrink:0;padding:0;height:auto;min-height:0;" +
+                "border:0;background:transparent;box-shadow:none;font:inherit;white-space:nowrap;cursor:pointer;" +
+                "color:var(--text-error);", "检查异常（" + skill.issues.length + "）");
+            warning.type = "button";
+            warning.setAttribute("aria-expanded", "false");
+            const arrow = el("span", "border:4px solid transparent;border-left-color:currentColor;border-right:0;");
+            arrow.setAttribute("aria-hidden", "true");
+            warning.prepend(arrow);
+            const issues = el("div", "color:var(--text-error);overflow-wrap:anywhere;", "问题：" + skill.issues.join("；"));
+            issues.hidden = true;
+            warning.onclick = () => {
+                issues.hidden = !issues.hidden;
+                warning.setAttribute("aria-expanded", String(!issues.hidden));
+                arrow.style.transform = issues.hidden ? "" : "rotate(90deg)";
+            };
+            titleLine.appendChild(warning);
+            info.appendChild(issues);
         }
         row.appendChild(info);
 
         const typeCell = el("td", SKILL_CELL_STYLE);
         const typeSelect = skillTypeSelect("类型", skill.source.kind);
+        typeSelect.style.width = "100%";
         typeSelect.title = skill.name;
         typeSelect.onchange = () => changeSkillType(typeSelect, skill);
         typeCell.appendChild(typeSelect);
         row.appendChild(typeCell);
 
         const actionCell = el("td", SKILL_CELL_STYLE);
-        const actions = el("div", "display:flex;gap:4px;flex-wrap:wrap;");
+        const actions = el("div", "display:flex;gap:4px;");
         actionCell.appendChild(actions);
         row.appendChild(actionCell);
+
+        appendEmptyHarnessCells(row, emptyHarnessColumns, "td");
 
         if (scope.harnessStates.length) {
             for (const hState of scope.harnessStates) {
                 const cell = el("td", SKILL_CELL_STYLE);
-                const line = el("div", "display:flex;align-items:center;gap:4px;flex-wrap:wrap;");
+                const line = el("div", "display:flex;align-items:center;justify-content:flex-end;gap:4px;flex-wrap:wrap;text-align:right;");
                 cell.appendChild(line);
                 if (hState.status === "whole-dir-linked") {
                     const status = el("span", "color:var(--text-muted);", "整目录已链接");
@@ -752,7 +785,9 @@ function mountSkills(plugin, host) {
                         };
                         line.appendChild(cleanBtn);
                     } else {
-                        line.appendChild(el("span", "color:var(--text-error);overflow-wrap:anywhere;max-width:24ch;", "冲突：" + sState.reason));
+                        const status = el("span", TRUNCATE_STYLE + "color:var(--text-error);", "冲突：" + sState.reason);
+                        status.title = status.textContent;
+                        line.appendChild(status);
                     }
                 }
                 row.appendChild(cell);
@@ -769,8 +804,8 @@ function mountSkills(plugin, host) {
             actions.appendChild(editBtn);
         } else {
             const updateBtn = el("button", SKILL_ACTION_STYLE, "更新");
-            const updateInfo = el("div", "max-width:30ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;");
-            info.appendChild(updateInfo);
+            const updateInfo = el("span", TRUNCATE_STYLE + "max-width:55%;flex-shrink:0;");
+            descriptionLine.appendChild(updateInfo);
             let updating = false;
             const updateStatus = () => {
                 const result = checks.status(skill.source);
@@ -799,7 +834,12 @@ function mountSkills(plugin, host) {
                 }
             };
             actions.appendChild(updateBtn);
-            const sourceBtn = el("button", SKILL_ACTION_STYLE, "修改链接");
+            const sourceBtn = el("button", SKILL_ACTION_STYLE +
+                "display:inline-flex;align-items:center;justify-content:center;width:28px;padding:0;--icon-size:14px;");
+            sourceBtn.type = "button";
+            sourceBtn.title = "修改链接";
+            sourceBtn.setAttribute("aria-label", sourceBtn.title);
+            setIcon(sourceBtn, "pencil");
             sourceBtn.onclick = () => openGitHubLinkModal(skill);
             actions.appendChild(sourceBtn);
         }
@@ -807,22 +847,39 @@ function mountSkills(plugin, host) {
         parent.appendChild(row);
     }
 
-    function renderSkillTable(parent, scope) {
+    function renderSkillTable(parent, scope, harnessColumns) {
         const scroll = el("div", "overflow-x:auto;max-width:100%;");
         scroll.tabIndex = 0;
         scroll.setAttribute("aria-label", "技能");
-        const table = el("table", "width:100%;border-collapse:collapse;table-layout:auto;margin:0;");
+        const minWidth = SKILL_NAME_MIN_WIDTH + SKILL_TYPE_WIDTH + SKILL_ACTION_WIDTH + harnessColumns * SKILL_HARNESS_WIDTH;
+        const table = el("table", "width:100%;border-collapse:collapse;table-layout:fixed;margin:0;min-width:" + minWidth + "px;");
+        const colgroup = el("colgroup");
+        colgroup.appendChild(el("col"));
+        colgroup.appendChild(el("col", "width:" + SKILL_TYPE_WIDTH + "px;"));
+        colgroup.appendChild(el("col", "width:" + SKILL_ACTION_WIDTH + "px;"));
+        if (harnessColumns) {
+            const harnessCols = el("col", "width:" + SKILL_HARNESS_WIDTH + "px;");
+            harnessCols.span = harnessColumns;
+            colgroup.appendChild(harnessCols);
+        }
+        table.appendChild(colgroup);
+
         const head = el("thead");
         const columns = el("tr");
-        for (const label of ["技能", "类型", "操作", ...scope.harnessStates.map(tool => tool.name)]) {
-            const header = el("th", SKILL_CELL_STYLE + "text-align:left;white-space:nowrap;", label);
+        const appendHeader = (label, alignment) => {
+            const header = el("th", SKILL_CELL_STYLE + TRUNCATE_STYLE + "text-align:" + alignment + ";", label);
             header.setAttribute("scope", "col");
+            header.title = label;
             columns.appendChild(header);
-        }
+        };
+        const emptyHarnessColumns = harnessColumns - scope.harnessStates.length;
+        for (const label of ["技能", "类型", "操作"]) appendHeader(label, "left");
+        appendEmptyHarnessCells(columns, emptyHarnessColumns, "th");
+        for (const tool of scope.harnessStates) appendHeader(tool.name, "right");
         head.appendChild(columns);
         table.appendChild(head);
         const body = el("tbody");
-        for (const skill of scope.skills) renderSkillRow(body, scope, skill);
+        for (const skill of scope.skills) renderSkillRow(body, scope, skill, emptyHarnessColumns);
         table.appendChild(body);
         scroll.appendChild(table);
         parent.appendChild(scroll);
@@ -830,6 +887,7 @@ function mountSkills(plugin, host) {
 
     function renderInitError(error) {
         const nextArea = el("div");
+        tabBar.empty();
         const card = el("div",
             "border:1px solid var(--background-modifier-border);border-radius:6px;padding:14px;");
         card.appendChild(el("div", "font-weight:600;margin-bottom:6px;", "技能管理不可用"));
@@ -846,8 +904,9 @@ function mountSkills(plugin, host) {
         updateRows.length = 0;
         const prevScroll = content.scrollTop || 0;
         const nextArea = el("div");
+        const harnessColumns = scopes.reduce((count, scope) => Math.max(count, scope.harnessStates.length), 0);
 
-        const tabBar = el("div", "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;");
+        tabBar.empty();
         const tabs = {};
         const panes = {};
 
@@ -860,7 +919,6 @@ function mountSkills(plugin, host) {
             }
         };
 
-        nextArea.appendChild(tabBar);
         for (const scope of scopes) {
             const tab = el("button", null, scope.name + "（" + scope.skills.length + "）");
             tab.onclick = () => activateTab(scope.key);
@@ -875,10 +933,11 @@ function mountSkills(plugin, host) {
                 "display:flex;align-items:center;gap:10px;flex-wrap:wrap;");
             const secMeta = el("div", "flex:1;min-width:0;");
             secMeta.appendChild(el("div", "font-weight:600;", scope.name));
-            secMeta.appendChild(el("div",
-                "font-size:var(--am-font-secondary);color:var(--text-muted);margin-top:3px;" +
-                "font-family:var(--font-monospace);word-break:break-all;",
-                "源目录：" + scope.sourceRoot));
+            const sourcePath = el("div", TRUNCATE_STYLE +
+                "font-size:var(--am-font-secondary);color:var(--text-muted);margin-top:3px;font-family:var(--font-monospace);",
+                "源目录：" + scope.sourceRoot);
+            sourcePath.title = scope.sourceRoot;
+            secMeta.appendChild(sourcePath);
             const manageBtn = el("button", "flex-shrink:0;font-size:var(--am-font-control);", "管理分发目标");
             manageBtn.type = "button";
             manageBtn.onclick = () => openTargetsModal(scope.kind === "user");
@@ -891,7 +950,6 @@ function mountSkills(plugin, host) {
             pane.appendChild(secHeader);
 
             renderHarnessSummary(pane, scope);
-            renderBrokenLinks(pane, scope);
 
             if (!scope.skills.length) {
                 const emptyCard = el("div",
@@ -900,8 +958,9 @@ function mountSkills(plugin, host) {
                     "当前目录中尚未发现含 SKILL.md 的技能子文件夹。");
                 pane.appendChild(emptyCard);
             } else {
-                renderSkillTable(pane, scope);
+                renderSkillTable(pane, scope, harnessColumns);
             }
+            renderBrokenLinks(pane, scope);
         }
 
         const defaultKey = scopes.some(scope => scope.key === activeScopeKey)
@@ -936,11 +995,12 @@ function mountSkills(plugin, host) {
         }
     }
 
-    const last = el("span", "margin-right:auto;align-self:center;font-size:var(--am-font-secondary);color:var(--text-muted);");
     const refreshButton = el("button", "font-size:var(--am-font-control);", "刷新");
     const checkUpdatesButton = el("button", "font-size:var(--am-font-control);", "检查更新");
     const undoButton = el("button", "font-size:var(--am-font-control);", "撤销上次操作");
     const bulkButton = el("button", "font-size:var(--am-font-control);", "一键分发");
+    listActions.appendChild(refreshButton);
+    listActions.appendChild(checkUpdatesButton);
 
     refreshHistory = () => {
         const op = history ? history.latest() : null;
@@ -1030,11 +1090,8 @@ function mountSkills(plugin, host) {
         }
     };
 
-    footer.appendChild(last);
-    footer.appendChild(refreshButton);
-    footer.appendChild(checkUpdatesButton);
-    footer.appendChild(undoButton);
-    footer.appendChild(bulkButton);
+    record.appendChild(undoButton);
+    actions.appendChild(bulkButton);
 
     async function enterPanel() {
         await safeRefresh();
