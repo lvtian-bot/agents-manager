@@ -342,16 +342,14 @@ function mountInstructions(plugin, host) {
             return merged.replace(/\n+$/, "") + "\n";
         };
 
-        var LABEL_BACKUP_AND_OVERWRITE = "备份并覆盖";
-
         channel.text = {
             deletedAfterSync: "目标文件在上次同步后被删除；确认后可用源正文重新创建。",
             initialCreate: "目标文件不存在，确认后可以创建。",
             recordOnly: "目标内容已一致，只需建立同步基线",
             unchanged: "目标内容已与 用户指令源笔记一致，已完成同步。",
-            initialReview: "目标文件与 用户指令源笔记不一致；可" + LABEL_BACKUP_AND_OVERWRITE + "、将目标版本回收进 用户指令源笔记，或行级对比合并。",
-            conflictBoth: "目标文件和 用户指令源笔记在上次同步后都被修改过；一键动作保留所选一侧、丢弃另一侧（可撤销上次操作），要两边都保留请行级对比合并。",
-            conflictTargetOnly: "目标文件在上次同步后被外部修改，用户指令源笔记未变；可将目标版本一键回收进 用户指令源笔记，或" + LABEL_BACKUP_AND_OVERWRITE + "。",
+            initialReview: "目标文件与 用户指令源笔记不一致；可备份并覆盖、将目标版本回收进 用户指令源笔记，或审阅合并。",
+            conflictBoth: "目标文件和 用户指令源笔记在上次同步后都被修改过；一键动作保留所选一侧、丢弃另一侧（可撤销上次操作），要两边都保留请审阅合并。",
+            conflictTargetOnly: "目标文件在上次同步后被外部修改，用户指令源笔记未变；可将目标版本一键回收进 用户指令源笔记，或备份并覆盖。",
             sync: "只有 用户指令源笔记发生变化，目标文件未被外部修改。",
             unchangedNoChange: "源和目标都没有变化。",
             // 用户级目标为整份文件，不存在标题结构异常，以下两条不会触发。
@@ -374,14 +372,6 @@ function mountInstructions(plugin, host) {
                 "写回时 用户指令源笔记正文与目标文件同时替换为合并结果，两边保持一致；写回保留源笔记 frontmatter。",
             mergeSourceLabel: "用户指令源笔记",
             mergeApplyLabel: "写回 用户指令源笔记与目标文件"
-        };
-
-        channel.labels = {
-            initialCreateButton: "创建并建立基线",
-            recycle: "用目标版本回收进 用户指令源笔记",
-            merge: "行级对比合并…",
-            overwriteExisting: LABEL_BACKUP_AND_OVERWRITE,
-            overwriteMissing: "用源正文重新创建"
         };
 
         return channel;
@@ -468,8 +458,8 @@ function mountInstructions(plugin, host) {
             initialCreate: "项目文件不存在，确认后从 " + sourceTitle + " 生成完整文件（含第三级示例，需自行按项目事实填写）。",
             recordOnly: "工作规范区块已与模板一致，只需建立同步基线。",
             unchanged: "工作规范区块已与模板一致，已完成同步。",
-            initialReview: "首次接入且工作规范与模板存在差异；可将项目版本回收进模板、用模板覆盖项目区块，或行级对比合并。",
-            conflictBoth: "模板和项目工作规范在上次同步后都被修改过；一键动作保留所选一侧、丢弃另一侧（可撤销上次操作），要两边都保留请行级对比合并。",
+            initialReview: "首次接入且工作规范与模板存在差异；可将项目版本回收进模板、用模板覆盖项目区块，或审阅合并。",
+            conflictBoth: "模板和项目工作规范在上次同步后都被修改过；一键动作保留所选一侧、丢弃另一侧（可撤销上次操作），要两边都保留请审阅合并。",
             conflictTargetOnly: "项目工作规范在上次同步后被修改，模板与上次分发时一致；可将项目版本一键回收进模板，或用模板覆盖项目区块。",
             sync: "模板已更新，项目工作规范仍是上次分发版本；将备份项目文件后只替换工作规范区块。",
             unchangedNoChange: "源和目标都没有变化。",
@@ -493,12 +483,6 @@ function mountInstructions(plugin, host) {
                 "模板 frontmatter、第 2 个一级标题之后的内容和项目第三级保持不变。",
             mergeSourceLabel: "模板",
             mergeApplyLabel: "写回模板与项目"
-        };
-
-        channel.labels = {
-            recycle: "回收\n项目改动",
-            overwriteExisting: "覆盖\n项目改动",
-            merge: "逐行\n合并"
         };
 
         return channel;
@@ -998,27 +982,13 @@ function mountInstructions(plugin, host) {
 
     // ===== 统一面板 =====
 
-    // 用户级目标沿用原有的冲突操作顺序和文件重建入口。
-    function buildConflictButtons(spec) {
-        if (!spec.fileExists) {
-            return [{ label: spec.overwriteLabel, primary: true, run: spec.overwriteRun }];
-        }
-        var recycleButton = { label: spec.recycleLabel, primary: !spec.sourceChanged, run: spec.recycleRun };
-        var overwriteButton = { label: spec.overwriteLabel, run: spec.overwriteRun };
-        var mergeButton = { label: spec.mergeLabel, primary: !!spec.sourceChanged, openMerge: spec.openMerge };
-        return spec.sourceChanged
-            ? [mergeButton, recycleButton, overwriteButton]
-            : [recycleButton, overwriteButton, mergeButton];
-    }
-
-    // 单个通道的目标卡片：按钮组装两级共用，差异（按钮文字）来自通道配置。
+    // 用户级、Work 和 Code 的卡片共用按钮和推荐规则，读写范围由通道决定。
     // unregister 由面板提供（第二级专用）：移除登记后清待处理计数；第一级不传。
     function appendChannelTargets(pane, targets, key, app, wrapRun, unregister, onChanged) {
         targets.forEach(function (target) {
             var buttons = [];
             var fileExists = fs.existsSync(target.path);
             var channel = target.channel;
-            var labels = channel.labels;
             var distribute = wrapRun(key, target, function () {
                 return applyChannelAction(channel, target);
             });
@@ -1029,7 +999,6 @@ function mountInstructions(plugin, host) {
                 new Notice(message);
                 return onChanged ? onChanged() : undefined;
             };
-            const isProject = channel !== USER_CHANNEL;
             const hasDifferences = fileExists && target.currentHash !== null &&
                 ["sync", "initial-review", "conflict"].includes(target.action);
             var openMerge = async function () {
@@ -1040,42 +1009,17 @@ function mountInstructions(plugin, host) {
             };
             var afterMerge = onChanged ? function () { return onChanged(); } : null;
 
-            if (isProject) {
-                const preferMerge = hasDifferences && (target.action === "initial-review" || target.sourceChangedSinceSync);
-                const preferRecycle = hasDifferences && target.action === "conflict" && !preferMerge;
-                const canDistribute = hasDifferences || target.action === "record-only" ||
-                    (!fileExists && ["initial-create", "conflict"].includes(target.action));
+            if (hasDifferences) {
+                const preferMerge = target.action === "initial-review" || target.sourceChangedSinceSync;
                 buttons = [
-                    { label: labels.recycle, primary: preferRecycle, disabled: !hasDifferences, run: recycle, afterSuccess },
-                    { label: labels.overwriteExisting, primary: canDistribute && !preferRecycle && !preferMerge,
-                        disabled: !canDistribute, run: distribute, afterSuccess },
-                    { label: labels.merge, primary: preferMerge, disabled: !hasDifferences, openMerge, afterMerge }
+                    { label: "回收\n改动", primary: target.action === "conflict" && !preferMerge, run: recycle, afterSuccess },
+                    { label: "覆盖\n改动", primary: target.action === "sync", run: distribute, afterSuccess },
+                    { label: "审阅\n合并", primary: preferMerge, openMerge, afterMerge }
                 ];
-            } else if (target.action === "sync") {
-                buttons.push({ label: "备份并分发", primary: true, run: distribute, afterSuccess: afterSuccess });
-            } else if (target.action === "initial-create") {
-                buttons.push({ label: labels.initialCreateButton, primary: true, run: distribute, afterSuccess: afterSuccess });
-            } else if (target.action === "record-only") {
-                buttons.push({ label: "建立同步基线", primary: true, run: distribute, afterSuccess: afterSuccess });
-            } else if (target.action === "initial-review") {
-                buttons.push({ label: labels.overwriteExisting, primary: true, run: distribute, afterSuccess: afterSuccess });
-                buttons.push({ label: labels.recycle, run: recycle, afterSuccess: afterSuccess });
-                buttons.push({ label: labels.merge, openMerge: openMerge, afterMerge: afterMerge });
-            } else if (target.action === "conflict") {
-                buttons = buildConflictButtons({
-                    fileExists: fileExists,
-                    sourceChanged: target.sourceChangedSinceSync,
-                    recycleLabel: labels.recycle,
-                    mergeLabel: labels.merge,
-                    recycleRun: recycle,
-                    overwriteLabel: fileExists ? labels.overwriteExisting : labels.overwriteMissing,
-                    overwriteRun: distribute,
-                    openMerge: openMerge
-                }).map(function (btn) {
-                    if (btn.openMerge) btn.afterMerge = afterMerge;
-                    else if (btn.run) btn.afterSuccess = afterSuccess;
-                    return btn;
-                });
+            } else if (!fileExists && target.currentHash === null && ["initial-create", "conflict"].includes(target.action)) {
+                buttons.push({ label: "创建目标文件", primary: true, run: distribute, afterSuccess });
+            } else if (fileExists && target.action === "record-only") {
+                buttons.push({ label: "建立同步基线", primary: true, run: distribute, afterSuccess });
             }
 
             // 第一级目标卡片提供移出分发列表入口（右上角 ×）；第二级卡片提供移除登记入口。
@@ -1099,7 +1043,6 @@ function mountInstructions(plugin, host) {
                 pathText: target.displayPath,
                 reason: target.reason,
                 statusText: statusText,
-                fixedActions: isProject,
                 buttons: buttons,
                 removeEntry: removeEntry
             });
@@ -1385,16 +1328,13 @@ function mountInstructions(plugin, host) {
             if (entry.label.includes("\n")) {
                 button.style.whiteSpace = "pre";
                 button.style.lineHeight = "1.25";
-                button.style.minWidth = "calc(4em + 16px)";
                 button.setAttribute("aria-label", entry.label.replace("\n", ""));
             }
             if (entry.primary) {
                 button.className = "mod-cta";
             }
 
-            if (entry.disabled) {
-                button.disabled = true;
-            } else if (entry.openMerge) {
+            if (entry.openMerge) {
                 button.onclick = function () {
                     button.disabled = true;
                     entry.openMerge().then(async function (result) {
@@ -1418,7 +1358,6 @@ function mountInstructions(plugin, host) {
                     try {
                         var resultMessage = await entry.run();
                         status.textContent = resultMessage;
-                        if (!card.fixedActions) button.textContent = "已完成";
                         button.className = "";
                         // 一个动作成功后卡片状态已改变，其余一键动作基于的是过期内容，全部停用。
                         runButtons.forEach(function (other) {
