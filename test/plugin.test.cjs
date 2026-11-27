@@ -21,6 +21,11 @@ class Element {
         child.parent = this;
     }
 
+    prepend(child) {
+        this.children.unshift(child);
+        child.parent = this;
+    }
+
     remove() {
         const siblings = this.parent.children;
         siblings.splice(siblings.indexOf(this), 1);
@@ -203,7 +208,8 @@ async function loadPlugin(app, options = {}) {
                     }
                     showAtPosition() { options.menu(this.items); }
                 }
-                return { Notice, Plugin, Modal, ItemView, Setting, Menu, ToggleComponent, PluginSettingTab: class {}, FuzzySuggestModal: class {
+                const setIcon = (element, icon) => element.setAttribute("data-icon", icon);
+                return { Notice, Plugin, Modal, ItemView, Setting, Menu, ToggleComponent, setIcon, PluginSettingTab: class {}, FuzzySuggestModal: class {
                     constructor(app) { this.app = app; }
                     open() { options.pick(this); }
                     onClose() {}
@@ -1547,9 +1553,15 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.equal(ribbon.title, leaf.view.getDisplayText());
     assert.equal(ribbon.icon, leaf.view.getIcon());
     assert.equal(button("指令同步").getAttribute("aria-selected"), "true");
+    assert.equal(button("指令同步").children[0].getAttribute("data-icon"), "refresh-cw");
+    assert.match(button("指令同步").style.cssText, /border-bottom-color:var\(--text-accent\)/);
+    const instructionsContent = leaf.view.hosts.instructions.children[0];
+    assert.match(instructionsContent.children.at(-1).textContent, /^用户级指令同步整篇正文/);
 
     await plugin.invoke("manage-skills");
     assert.equal(button("技能管理").getAttribute("aria-selected"), "true");
+    assert.equal(button("技能管理").children[0].getAttribute("data-icon"), "blocks");
+    assert.doesNotMatch(button("指令同步").style.cssText, /border-bottom-color/);
     workspace.setActiveLeaf(workspace.getLeaf("tab"));
     await ribbon.callback();
     assert.deepEqual(workspace.getLeavesOfType("agents-manager-workspace"), [leaf]);
@@ -1586,6 +1598,26 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.ok(skillsTextIncludes("目录名不符合小写 kebab-case").length > 0);
     assert.ok(skillsTextIncludes("缺少 description").length > 0);
     assert.ok(skillsTextIncludes("包含 agents/openai.yaml").length > 0);
+    const skillContent = skillsHost.children[0];
+    assert.match(skillContent.children.at(-1).textContent, /^技能来自用户主目录/);
+    const warning = sButton("检查异常（4）");
+    assert.equal(warning.parent.children[0].textContent, "Bad_Name");
+    const issueDetails = skillsTextIncludes("缺少 description")[0];
+    assert.equal(issueDetails.hidden, true);
+    warning.onclick();
+    assert.equal(warning.getAttribute("aria-expanded"), "true");
+    assert.equal(issueDetails.hidden, false);
+    warning.onclick();
+    assert.equal(warning.getAttribute("aria-expanded"), "false");
+    assert.equal(issueDetails.hidden, true);
+    const [userTable, projectTable] = findElements(skillsHost, node => node.tag === "table");
+    assert.match(userTable.style.cssText, /table-layout:fixed/);
+    assert.equal(userTable.style.cssText, projectTable.style.cssText);
+    assert.equal(findElements(projectTable, node => node.tag === "th" && node.getAttribute("aria-hidden") === "true")[0].colSpan, 1);
+    sButton("项目A（1）").onclick();
+    assert.equal(userTable.parent.parent.style.display, "none");
+    assert.equal(projectTable.parent.parent.style.display, "");
+    sButton("用户级技能（4）").onclick();
 
     // 3. 自建技能编辑与撤销
     sButton("编辑").onclick();

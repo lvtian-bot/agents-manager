@@ -1447,8 +1447,10 @@ function mountInstructions(plugin, host) {
     host.appendChild(content);
     host.appendChild(footer);
 
+    var panel = el("div");
+    content.appendChild(panel);
     content.appendChild(el("div",
-        "margin-bottom:14px;line-height:1.5;color:var(--text-muted);font-size:var(--am-font-secondary);",
+        "margin-top:14px;line-height:1.5;color:var(--text-muted);font-size:var(--am-font-secondary);",
         "用户级指令同步整篇正文。Work 和 Code 项目只同步第一个一级标题及其内容，到第二个一级标题前为止。"));
 
     var TAB_BASE_STYLE =
@@ -1468,7 +1470,7 @@ function mountInstructions(plugin, host) {
         });
         if (area) area.remove();
         area = nextArea;
-        content.appendChild(area);
+        panel.appendChild(area);
     }
 
     async function refreshPanel() {
@@ -1666,7 +1668,7 @@ function mountInstructions(plugin, host) {
 
         if (area) area.remove();
         area = nextArea;
-        content.appendChild(area);
+        panel.appendChild(area);
         content.scrollTop = prevScroll;
     }
 

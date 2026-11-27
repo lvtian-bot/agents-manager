@@ -1,21 +1,21 @@
-const { ItemView } = require("obsidian");
+const { ItemView, setIcon } = require("obsidian");
 
 const WORKSPACE_VIEW_TYPE = "agents-manager-workspace";
 const WORKSPACE_VIEW_TITLE = "多 Agent 管理";
 const WORKSPACE_VIEW_ICON = "layers";
 
 const SECTION_DEFS = [
-    { key: "instructions", label: "指令同步" },
-    { key: "skills", label: "技能管理" },
+    { key: "instructions", label: "指令同步", icon: "refresh-cw" },
+    { key: "skills", label: "技能管理", icon: "blocks" },
 ];
 
 const NAV_BASE_STYLE =
-    "padding:7px 14px;border-radius:6px;cursor:pointer;font-size:var(--am-font-control);box-shadow:none;" +
-    "background:transparent;border:1px solid transparent;color:var(--text-muted);";
-const NAV_ACTIVE_STYLE =
-    "padding:7px 14px;border-radius:6px;cursor:pointer;font-size:var(--am-font-control);box-shadow:none;" +
-    "background:var(--background-secondary);border:1px solid var(--background-modifier-border);" +
-    "color:var(--text-normal);font-weight:600;";
+    "display:inline-flex;align-items:center;gap:6px;padding:10px 0;height:auto;" +
+    "border:0;border-bottom:2px solid transparent;border-radius:0;cursor:pointer;" +
+    "font-size:var(--am-font-control);box-shadow:none;background:transparent;" +
+    "white-space:nowrap;color:var(--text-muted);";
+const NAV_ACTIVE_STYLE = NAV_BASE_STYLE +
+    "border-bottom-color:var(--text-accent);color:var(--text-accent);font-weight:600;";
 
 function avoidStatusBar(root, workspace) {
     const doc = root.ownerDocument;
@@ -80,7 +80,7 @@ class ManagerWorkspaceView extends ItemView {
         const nav = document.createElement("div");
         nav.setAttribute("role", "tablist");
         nav.style.cssText =
-            "display:flex;align-items:center;gap:8px;padding:10px 18px;" +
+            "display:flex;align-items:center;gap:24px;padding:0 18px;" +
             "border-bottom:1px solid var(--background-modifier-border);flex-shrink:0;";
 
         const stage = document.createElement("div");
@@ -91,6 +91,11 @@ class ManagerWorkspaceView extends ItemView {
             button.type = "button";
             button.textContent = def.label;
             button.setAttribute("role", "tab");
+            const icon = document.createElement("span");
+            icon.style.cssText = "display:inline-flex;--icon-size:14px;";
+            icon.setAttribute("aria-hidden", "true");
+            setIcon(icon, def.icon);
+            button.prepend(icon);
             button.onclick = () => {
                 this.plugin.run(() => this.setSection(def.key));
             };
