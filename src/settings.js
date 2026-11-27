@@ -252,14 +252,13 @@ class ManagerSettings extends PluginSettingTab {
             clearError();
             button.setDisabled(true);
             try {
-                const updated = { ...plugin.settings };
+                const patch = {};
                 for (const [key, getValue] of readers) {
                     if (single.hidden && key === "singleTemplate") continue;
                     if (multiple.hidden && ["typeProperty", "templates", "defaultTemplate"].includes(key)) continue;
-                    updated[key] = getValue();
+                    patch[key] = getValue();
                 }
-                await plugin.saveData(updated);
-                plugin.settings = updated;
+                await plugin.updateSettings(current => ({ ...current, ...patch }));
                 new Notice("设置已保存。");
             } catch (error) {
                 if (!invalidInput) new Notice("设置保存失败。");

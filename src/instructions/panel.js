@@ -10,7 +10,7 @@ const { harnessTargets } = require("../settings");
 function mountInstructions(plugin, host) {
     const { app } = plugin;
     const getLayer1Source = () => plugin.settings.userSource;
-    const getLayer1Targets = () => Object.entries(plugin.settings.targets).map(([name, file]) => ({
+    const getLayer1Targets = () => Object.entries(plugin.settings.targets || {}).map(([name, file]) => ({
         name, path: file.startsWith("~/") ? path.join(os.homedir(), file.slice(2)) : file,
     }));
     const getTypeSources = () => ({
@@ -39,21 +39,15 @@ function mountInstructions(plugin, host) {
         finally { plugin.syncBusy = false; refreshHistory(); }
     }
 
-    async function saveLayer1Targets(nextTargets) {
-        const updated = { ...plugin.settings, targets: nextTargets };
-        await plugin.saveData(updated);
-        plugin.settings = updated;
-    }
-
     async function addLayer1Target(name) {
         try {
             let added = false;
-            await exclusive(async () => {
-                const current = plugin.settings.targets || {};
-                if (Object.prototype.hasOwnProperty.call(current, name)) return;
-                await saveLayer1Targets({ ...current, [name]: harnessTargets[name] });
+            await exclusive(() => plugin.updateSettings(current => {
+                const targets = current.targets || {};
+                if (Object.prototype.hasOwnProperty.call(targets, name)) return null;
                 added = true;
-            });
+                return { ...current, targets: { ...targets, [name]: harnessTargets[name] } };
+            }));
             if (added) {
                 new Notice("已添加用户指令目标：" + name);
                 await safeRefresh();
@@ -65,11 +59,28 @@ function mountInstructions(plugin, host) {
 
     function removeLayer1Target(target) {
         return exclusive(async () => {
-            const current = { ...(plugin.settings.targets || {}) };
-            delete current[target.name];
-            await saveLayer1Targets(current);
+            await plugin.updateSettings(current => {
+                const targets = { ...(current.targets || {}) };
+                delete targets[target.name];
+                return { ...current, targets };
+            });
             return "已将 " + target.name + " 移出用户指令分发列表（目标文件未改动）。";
         });
+    }
+
+    function buildLayer1RemoveEntry(target, onChanged) {
+        return {
+            ariaLabel: "移出 " + target.name,
+            tooltip: "移出分发列表（不删除目标文件）",
+            confirmTitle: "移出分发列表",
+            confirmMessage: "将把 " + target.name + " 从用户指令分发列表移出，目标文件不会改动；随时可通过「添加目标」重新加入。如果上次操作涉及该目标，移出后将无法直接撤销。",
+            confirmButton: "移出列表",
+            notify: true,
+            remove: function () { return removeLayer1Target(target); },
+            afterRemove: function () {
+                if (onChanged) return onChanged();
+            }
+        };
     }
 
     async function loadPlans() {
@@ -1043,18 +1054,7 @@ function mountInstructions(plugin, host) {
             // 第一级目标卡片提供移出分发列表入口（右上角 ×）；第二级卡片提供移除登记入口。
             var removeEntry = null;
             if (channel.id === "user") {
-                removeEntry = {
-                    ariaLabel: "移出 " + target.name,
-                    tooltip: "移出分发列表（不删除目标文件）",
-                    confirmTitle: "移出分发列表",
-                    confirmMessage: "将把 " + target.name + " 从用户指令分发列表移出，目标文件不会改动；随时可通过「添加目标」重新加入。如果上次操作涉及该目标，移出后将无法直接撤销。",
-                    confirmButton: "移出列表",
-                    notify: true,
-                    remove: function () { return removeLayer1Target(target); },
-                    afterRemove: function () {
-                        if (onChanged) return onChanged();
-                    }
-                };
+                removeEntry = buildLayer1RemoveEntry(target, onChanged);
             } else if (unregister) {
                 removeEntry = {
                     remove: function () { return unregisterProject(target); },
@@ -1559,6 +1559,14 @@ function mountInstructions(plugin, host) {
                 title: "第一级不可用",
                 pathText: layer1SourcePath,
                 reason: layer1.error
+            });
+            getLayer1Targets().forEach(function (target) {
+                appendCard(panes.layer1, {
+                    title: target.name,
+                    pathText: target.path,
+                    reason: "源笔记不可用，暂时无法同步；仍可通过右上角「×」移出分发列表。",
+                    removeEntry: buildLayer1RemoveEntry(target, safeRefresh)
+                });
             });
         } else if (!layer1.plan.targets.length) {
             appendCard(panes.layer1, {

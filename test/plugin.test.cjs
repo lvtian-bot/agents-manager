@@ -85,7 +85,7 @@ async function loadPlugin(app, options = {}) {
     }
     class Plugin {
         async loadData() { return options.settings || {}; }
-        async saveData(settings) { options.save(settings); }
+        async saveData(settings) { return options.save(settings); }
         registerView(type, factory) { views[type] = factory; }
         addSettingTab(tab) { this.settingTab = tab; }
         addCommand(command) {
@@ -2388,4 +2388,85 @@ test("笔记 AI 处理覆盖请求取消、接口错误及生成期间切换或�
         assert.equal(plugin.body.children.length, 1);
         findElements(plugin.body, el => el.tag === "button" && el.textContent === "放弃")[0].onclick();
     }
+});
+
+test("PR 审查回归：源笔记缺失时仍可移出用户指令目标，且跨页面保存串行化不互相覆盖", async (t) => {
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-pr-review-"));
+    t.after(() => fs.rmSync(fixtureDir, { recursive: true, force: true }));
+
+    const vaultRoot = path.join(fixtureDir, "vault");
+    const homeDir = path.join(fixtureDir, "home");
+    const userSkillsRoot = path.join(homeDir, ".agents", "skills");
+    fs.mkdirSync(vaultRoot, { recursive: true });
+    fs.mkdirSync(path.join(userSkillsRoot, "demo-skill"), { recursive: true });
+    fs.writeFileSync(path.join(userSkillsRoot, "demo-skill", "SKILL.md"), "---\nname: demo-skill\ndescription: 示例\n---\n", "utf8");
+
+    const saved = [];
+    const notices = [];
+    let choices = [];
+    let releaseFirstSave;
+    let firstSaveStarted;
+    const firstSaveGate = new Promise(resolve => { firstSaveStarted = resolve; });
+    const tick = () => new Promise(resolve => setImmediate(resolve));
+
+    const plugin = await loadPlugin({
+        workspace: { getActiveFile: () => null, getLeavesOfType: () => [] },
+        vault: { adapter: { getBasePath: () => vaultRoot } },
+    }, {
+        fixtureDir,
+        notices,
+        menu: items => { choices = items; },
+        async save(settings) {
+            saved.push(settings);
+            if (saved.length === 1) {
+                firstSaveStarted();
+                await new Promise(resolve => { releaseFirstSave = resolve; });
+            }
+        },
+        settings: {
+            userSource: "",
+            targets: {},
+        },
+    });
+
+    const instructionsHost = () => plugin.body.children[0].children[0].children[1].children[0];
+    const skillsHost = () => plugin.body.children[0].children[0].children[1].children[1];
+    const currentModal = () => plugin.body.children.at(-1);
+
+    // 1. 源笔记为空时，打开技能弹窗保存（阻塞 saveData）期间并发添加指令目标，串行化后两边修改均保留
+    await plugin.invoke("manage-skills");
+    findElements(skillsHost(), n => n.tag === "button" && n.textContent === "管理分发目标")[0].onclick();
+    findElements(currentModal(), n => n.tag === "button" && n.textContent === "添加目标")[0].onclick();
+    findElements(currentModal(), n => n.getAttribute("aria-label") === "工具名称")[1].value = "CustomSkillTool";
+    findElements(currentModal(), n => n.getAttribute("aria-label") === "技能目录")[1].value = "~/custom-skills";
+
+    const skillSavePromise = findElements(currentModal(), n => n.tag === "button" && n.textContent === "保存")[0].onclick();
+    await firstSaveGate;
+    assert.equal(findElements(currentModal(), n => n.tag === "button" && n.textContent === "取消")[0].disabled, true);
+
+    await plugin.invoke("sync-instructions");
+    findElements(instructionsHost(), n => n.tag === "button" && n.textContent === "添加目标")[0].onclick();
+    const instrAddPromise = choices[0].action();
+    await tick();
+    assert.equal(saved.length, 1);
+
+    releaseFirstSave();
+    await Promise.all([skillSavePromise, instrAddPromise]);
+    assert.equal(saved.length, 2);
+    assert.equal(plugin.plugin.settings.skillUserTargets.CustomSkillTool, "~/custom-skills");
+    assert.equal(plugin.plugin.settings.targets.Codex, "~/.codex/AGENTS.md");
+
+    // 2. 即使源笔记未配置（第一级不可用），仍渲染已有目标卡片并支持移出
+    const removeCodex = findElements(instructionsHost(), n => n.getAttribute("aria-label") === "移出 Codex");
+    assert.equal(removeCodex.length, 1);
+    const removePromise = removeCodex[0].onclick();
+    await tick();
+    findElements(currentModal(), n => n.tag === "button" && n.textContent === "移出列表")[0].onclick();
+    await removePromise;
+    await tick();
+    assert.equal(plugin.plugin.settings.targets.Codex, undefined);
+    assert.equal(plugin.plugin.settings.skillUserTargets.CustomSkillTool, "~/custom-skills");
+    assert.equal(findElements(instructionsHost(), n => n.getAttribute("aria-label") === "移出 Codex").length, 0);
+
+    await plugin.closeWorkspace();
 });

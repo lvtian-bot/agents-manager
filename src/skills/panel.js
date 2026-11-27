@@ -424,17 +424,19 @@ function mountSkills(plugin, host) {
             }
 
             saveBtn.disabled = true;
+            cancelBtn.disabled = true;
             try {
-                await exclusive(async () => {
-                    const updated = { ...plugin.settings, [config.key]: Object.fromEntries(entries) };
-                    await plugin.saveData(updated);
-                    plugin.settings = updated;
-                });
+                const nextMap = Object.fromEntries(entries);
+                await exclusive(() => plugin.updateSettings(current => ({
+                    ...current,
+                    [config.key]: nextMap,
+                })));
                 modal.close();
                 new Notice(config.notice);
                 await safeRefresh();
             } catch (error) {
                 saveBtn.disabled = false;
+                cancelBtn.disabled = false;
                 errorEl.textContent = error.message || String(error);
             }
         };
