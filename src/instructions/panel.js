@@ -2,14 +2,15 @@ var fs = require("fs");
 var path = require("path");
 var os = require("os");
 var crypto = require("crypto");
-const { Notice } = require("obsidian");
+const { Notice, Menu } = require("obsidian");
 const { syncDirectory, readText, replaceText, createHistory } = require("./storage");
 const { normalizeNewlines, extractInstructionBody, parseWorkStructure, rebuildDocument, computeLineDiff, composeMergedBody } = require("./documents");
+const { harnessTargets } = require("../settings");
 
 function mountInstructions(plugin, host) {
     const { app } = plugin;
     const getLayer1Source = () => plugin.settings.userSource;
-    const getLayer1Targets = () => Object.entries(plugin.settings.targets).map(([name, file]) => ({
+    const getLayer1Targets = () => Object.entries(plugin.settings.targets || {}).map(([name, file]) => ({
         name, path: file.startsWith("~/") ? path.join(os.homedir(), file.slice(2)) : file,
     }));
     const getTypeSources = () => ({
@@ -36,6 +37,50 @@ function mountInstructions(plugin, host) {
         plugin.syncBusy = true;
         try { return await action(); }
         finally { plugin.syncBusy = false; refreshHistory(); }
+    }
+
+    async function addLayer1Target(name) {
+        try {
+            let added = false;
+            await exclusive(() => plugin.updateSettings(current => {
+                const targets = current.targets || {};
+                if (Object.prototype.hasOwnProperty.call(targets, name)) return null;
+                added = true;
+                return { ...current, targets: { ...targets, [name]: harnessTargets[name] } };
+            }));
+            if (added) {
+                new Notice("已添加用户指令目标：" + name);
+                await safeRefresh();
+            }
+        } catch (error) {
+            await showMessage("添加目标失败", error && error.message ? error.message : String(error));
+        }
+    }
+
+    function removeLayer1Target(target) {
+        return exclusive(async () => {
+            await plugin.updateSettings(current => {
+                const targets = { ...(current.targets || {}) };
+                delete targets[target.name];
+                return { ...current, targets };
+            });
+            return "已将 " + target.name + " 移出用户指令分发列表（目标文件未改动）。";
+        });
+    }
+
+    function buildLayer1RemoveEntry(target, onChanged) {
+        return {
+            ariaLabel: "移出 " + target.name,
+            tooltip: "移出分发列表（不删除目标文件）",
+            confirmTitle: "移出分发列表",
+            confirmMessage: "将把 " + target.name + " 从用户指令分发列表移出，目标文件不会改动；随时可通过「添加目标」重新加入。如果上次操作涉及该目标，移出后将无法直接撤销。",
+            confirmButton: "移出列表",
+            notify: true,
+            remove: function () { return removeLayer1Target(target); },
+            afterRemove: function () {
+                if (onChanged) return onChanged();
+            }
+        };
     }
 
     async function loadPlans() {
@@ -1006,9 +1051,11 @@ function mountInstructions(plugin, host) {
                 });
             }
 
-            // 第二级卡片提供移除登记入口（右上角 ×）；第一级目标清单硬编码在脚本顶部，增删直接改脚本。
+            // 第一级目标卡片提供移出分发列表入口（右上角 ×）；第二级卡片提供移除登记入口。
             var removeEntry = null;
-            if (unregister && channel.id !== "user") {
+            if (channel.id === "user") {
+                removeEntry = buildLayer1RemoveEntry(target, onChanged);
+            } else if (unregister) {
                 removeEntry = {
                     remove: function () { return unregisterProject(target); },
                     afterRemove: function () { unregister(key, target); }
@@ -1164,19 +1211,23 @@ function mountInstructions(plugin, host) {
         pane.appendChild(error);
     }
 
-    function appendSectionHeader(content, title, subtitle) {
+    function appendSectionHeader(content, title, subtitle, actionEl) {
         var header = el("div",
             "margin:6px 0 10px;padding:8px 12px;background:var(--background-secondary);" +
-            "border-radius:6px;font-weight:600;", title);
+            "border-radius:6px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;");
+        var meta = el("div", "flex:1;min-width:0;");
+        meta.appendChild(el("div", "font-weight:600;", title));
         if (subtitle) {
-            header.appendChild(el("div",
+            meta.appendChild(el("div",
                 "font-weight:400;font-size:11px;color:var(--text-muted);margin-top:3px;" +
                 "font-family:var(--font-monospace);word-break:break-all;", subtitle));
         }
+        header.appendChild(meta);
+        if (actionEl) header.appendChild(actionEl);
         content.appendChild(header);
     }
 
-    // card.removeEntry（第二级专用）：卡片右上角 × 入口，确认后移除登记并整卡消失，
+    // card.removeEntry：卡片右上角 × 入口，确认后移出或移除并整卡消失，
     // 与底部「处理同步状态」的动作按钮在视觉与语义上分开。
     function appendCard(content, card) {
         var row = el("div",
@@ -1200,25 +1251,28 @@ function mountInstructions(plugin, host) {
                 "background:transparent;border:none;box-shadow:none;cursor:pointer;" +
                 "padding:0 4px;color:var(--text-faint);font-size:18px;line-height:1;" +
                 "flex-shrink:0;", "×");
-            closeButton.setAttribute("aria-label", "移除登记");
-            closeButton.title = "移除登记（项目文件不改动）";
+            closeButton.setAttribute("aria-label", remove.ariaLabel || "移除登记");
+            closeButton.title = remove.tooltip || "移除登记（项目文件不改动）";
             closeButton.onmouseenter = function () { closeButton.style.color = "var(--text-error)"; };
             closeButton.onmouseleave = function () { closeButton.style.color = "var(--text-faint)"; };
             closeButton.onclick = function () {
                 showConfirm(
-                    "移除登记",
-                    "将把 " + card.title + " 从项目登记表移除，并清理它的同步基线。\n" +
-                        "项目文件夹和 AGENTS.md 不会改动；重新登记即可恢复跟踪。",
-                    "移除登记"
-                ).then(function (confirmed) {
+                    remove.confirmTitle || "移除登记",
+                    remove.confirmMessage || ("将把 " + card.title + " 从项目登记表移除，并清理它的同步基线。\n" +
+                        "项目文件夹和 AGENTS.md 不会改动；重新登记即可恢复跟踪。"),
+                    remove.confirmButton || "移除登记"
+                ).then(async function (confirmed) {
                     if (!confirmed) return;
+                    closeButton.disabled = true;
                     try {
-                        var message = remove.remove();
+                        var message = await remove.remove();
                         row.remove();
-                        if (remove.afterRemove) remove.afterRemove();
-                        showMessage("移除登记", message);
+                        if (remove.notify) new Notice(message);
+                        else showMessage(remove.confirmTitle || "移除登记", message);
+                        if (remove.afterRemove) await remove.afterRemove();
                     } catch (error) {
-                        status.textContent = "移除登记未完成：" + (error.message || String(error));
+                        closeButton.disabled = false;
+                        status.textContent = (remove.confirmTitle || "移除登记") + "未完成：" + (error.message || String(error));
                     }
                 });
             };
@@ -1478,12 +1532,47 @@ function mountInstructions(plugin, host) {
         refreshTabLabels();
 
         // ===== 第一级区块 =====
-        appendSectionHeader(panes.layer1, "第一级：用户级指令", "源：" + layer1SourcePath + "　状态：" + LAYER1_STATE_PATH);
+        var currentTargets = plugin.settings.targets || {};
+        var availableHarnesses = Object.keys(harnessTargets).filter(function (name) {
+            return !Object.prototype.hasOwnProperty.call(currentTargets, name);
+        });
+        var addTargetButton = el("button", "flex-shrink:0;", "添加目标");
+        addTargetButton.type = "button";
+        addTargetButton.disabled = availableHarnesses.length === 0;
+        addTargetButton.onclick = function () {
+            var menu = new Menu();
+            availableHarnesses.forEach(function (name) {
+                menu.addItem(function (item) {
+                    item.setTitle(name).onClick(function () {
+                        return addLayer1Target(name);
+                    });
+                });
+            });
+            var bounds = typeof addTargetButton.getBoundingClientRect === "function"
+                ? addTargetButton.getBoundingClientRect()
+                : { left: 0, bottom: 0 };
+            menu.showAtPosition({ x: bounds.left, y: bounds.bottom }, addTargetButton.ownerDocument);
+        };
+        appendSectionHeader(panes.layer1, "第一级：用户级指令", "源：" + layer1SourcePath + "　状态：" + LAYER1_STATE_PATH, addTargetButton);
         if (layer1.error) {
             appendCard(panes.layer1, {
                 title: "第一级不可用",
                 pathText: layer1SourcePath,
                 reason: layer1.error
+            });
+            getLayer1Targets().forEach(function (target) {
+                appendCard(panes.layer1, {
+                    title: target.name,
+                    pathText: target.path,
+                    reason: "源笔记不可用，暂时无法同步；仍可通过右上角「×」移出分发列表。",
+                    removeEntry: buildLayer1RemoveEntry(target, safeRefresh)
+                });
+            });
+        } else if (!layer1.plan.targets.length) {
+            appendCard(panes.layer1, {
+                title: "尚未添加用户指令目标",
+                pathText: "",
+                reason: "尚未添加用户指令目标，可点击上方「添加目标」选择要分发的工具。"
             });
         } else {
             appendChannelTargets(panes.layer1, layer1.plan.targets, "layer1", app, wrapRun, null, safeRefresh);

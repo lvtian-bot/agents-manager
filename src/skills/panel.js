@@ -1,6 +1,7 @@
 const fs = require("fs");
 const { Notice } = require("obsidian");
 const { readText } = require("../instructions/storage");
+const { skillUserPath, skillProjectPath, required } = require("../settings");
 const {
     resolveStateRoot,
     readSkillSources,
@@ -308,6 +309,141 @@ function mountSkills(plugin, host) {
         modal.footer.appendChild(saveBtn);
     }
 
+    function openTargetsModal(isUser) {
+        const config = isUser ? {
+            key: "skillUserTargets",
+            validator: skillUserPath,
+            title: "管理用户级技能分发目标",
+            desc: "填写工具名称及技能目录（须以 ~/ 开头或使用绝对路径）；保存只更新分发目标列表，不删除已有技能文件或软链接。",
+            pathLabel: "技能目录",
+            notice: "已更新用户级技能分发目标。",
+        } : {
+            key: "skillProjectTargets",
+            validator: skillProjectPath,
+            title: "管理项目级技能分发目标（对所有项目生效）",
+            desc: "此处配置对当前仓库及所有已登记项目共同生效；填写相对于项目根目录的路径（不能为 .agents/skills 本身），保存不删除已有文件或软链接。",
+            pathLabel: "相对技能目录",
+            notice: "已更新项目级技能分发目标（对所有项目生效）。",
+        };
+
+        const modal = createModal({ title: config.title, width: 680, widthVw: 92, maxHeight: 84 });
+        modal.body.style.cssText = "padding:16px 18px;overflow:auto;display:flex;flex-direction:column;gap:12px;";
+        modal.body.appendChild(el("div", "font-size:13px;line-height:1.55;color:var(--text-muted);", config.desc));
+
+        const toolbar = el("div", "display:flex;justify-content:flex-end;");
+        const addBtn = el("button", null, "添加目标");
+        addBtn.type = "button";
+        toolbar.appendChild(addBtn);
+        modal.body.appendChild(toolbar);
+
+        const list = el("div", "display:flex;flex-direction:column;gap:8px;");
+        modal.body.appendChild(list);
+
+        const errorEl = el("div", "color:var(--text-error);font-size:12px;min-height:1em;");
+        errorEl.setAttribute("role", "alert");
+        modal.body.appendChild(errorEl);
+
+        const rows = [];
+        let invalidInput = null;
+        function clearError() {
+            invalidInput?.removeAttribute("aria-invalid");
+            invalidInput = null;
+            errorEl.textContent = "";
+        }
+
+        function addRow(name, value) {
+            const row = el("div", "display:flex;flex-wrap:wrap;gap:8px;align-items:end;");
+            function column(label, initial, flex) {
+                const cell = el("label", `display:grid;gap:4px;min-width:0;flex:${flex} 1 120px;font-size:12px;`);
+                cell.appendChild(el("span", "color:var(--text-muted);", label));
+                const input = el("input",
+                    "min-width:0;max-width:100%;padding:6px 10px;border:1px solid var(--background-modifier-border);border-radius:6px;font-size:13px;");
+                input.type = "text";
+                input.setAttribute("aria-label", label);
+                input.placeholder = label;
+                input.value = initial || "";
+                cell.appendChild(input);
+                row.appendChild(cell);
+                return input;
+            }
+            const nameInput = column("工具名称", name, 1);
+            const pathInput = column(config.pathLabel, value, 2);
+            const removeBtn = el("button", null, "移除");
+            removeBtn.type = "button";
+            const entry = { row, nameInput, pathInput };
+            removeBtn.onclick = () => {
+                clearError();
+                const idx = rows.indexOf(entry);
+                if (idx >= 0) rows.splice(idx, 1);
+                row.remove();
+            };
+            row.appendChild(removeBtn);
+            rows.push(entry);
+            list.appendChild(row);
+            return nameInput;
+        }
+
+        for (const [name, value] of Object.entries(plugin.settings[config.key] || {})) {
+            addRow(name, value);
+        }
+        addBtn.onclick = () => {
+            clearError();
+            addRow("", "").focus();
+        };
+
+        const cancelBtn = el("button", null, "取消");
+        cancelBtn.onclick = () => modal.close();
+        const saveBtn = el("button", null, "保存");
+        saveBtn.className = "mod-cta";
+        saveBtn.onclick = async () => {
+            clearError();
+            const entries = new Map();
+            function fail(input, error) {
+                errorEl.textContent = error.message || String(error);
+                invalidInput = input;
+                input.setAttribute("aria-invalid", "true");
+                input.focus();
+            }
+            for (const { nameInput, pathInput } of rows) {
+                let keyName;
+                try {
+                    keyName = required(String(nameInput.value || "").trim());
+                    if (entries.has(keyName)) throw new Error("工具名称不能重复。");
+                } catch (error) {
+                    fail(nameInput, error);
+                    return;
+                }
+                let parsedPath;
+                try {
+                    parsedPath = config.validator(required(String(pathInput.value || "").trim()));
+                } catch (error) {
+                    fail(pathInput, error);
+                    return;
+                }
+                entries.set(keyName, parsedPath);
+            }
+
+            saveBtn.disabled = true;
+            cancelBtn.disabled = true;
+            try {
+                const nextMap = Object.fromEntries(entries);
+                await exclusive(() => plugin.updateSettings(current => ({
+                    ...current,
+                    [config.key]: nextMap,
+                })));
+                modal.close();
+                new Notice(config.notice);
+                await safeRefresh();
+            } catch (error) {
+                saveBtn.disabled = false;
+                cancelBtn.disabled = false;
+                errorEl.textContent = error.message || String(error);
+            }
+        };
+        modal.footer.appendChild(cancelBtn);
+        modal.footer.appendChild(saveBtn);
+    }
+
     function formatCheckStatus(cached) {
         if (!cached) return "";
         if (cached.error) return "检查失败：" + cached.error;
@@ -324,7 +460,7 @@ function mountSkills(plugin, host) {
             parent.appendChild(el("div",
                 "margin-bottom:12px;padding:10px 12px;border:1px solid var(--background-modifier-border);" +
                 "border-radius:6px;font-size:12px;color:var(--text-muted);",
-                "未配置该作用域的分发目标，可在插件设置中添加。"));
+                "尚未配置分发目标，可点击上方「管理分发目标」添加。"));
             return;
         }
         const box = el("div",
@@ -627,11 +763,18 @@ function mountSkills(plugin, host) {
             nextArea.appendChild(pane);
 
             const secHeader = el("div",
-                "margin:6px 0 10px;padding:8px 12px;background:var(--background-secondary);border-radius:6px;font-weight:600;",
-                scope.name);
-            secHeader.appendChild(el("div",
+                "margin:6px 0 10px;padding:8px 12px;background:var(--background-secondary);border-radius:6px;" +
+                "display:flex;align-items:center;gap:10px;flex-wrap:wrap;");
+            const secMeta = el("div", "flex:1;min-width:0;");
+            secMeta.appendChild(el("div", "font-weight:600;", scope.name));
+            secMeta.appendChild(el("div",
                 "font-weight:400;font-size:11px;color:var(--text-muted);margin-top:3px;font-family:var(--font-monospace);word-break:break-all;",
                 "源目录：" + scope.sourceRoot));
+            const manageBtn = el("button", "flex-shrink:0;", "管理分发目标");
+            manageBtn.type = "button";
+            manageBtn.onclick = () => openTargetsModal(scope.kind === "user");
+            secHeader.appendChild(secMeta);
+            secHeader.appendChild(manageBtn);
             pane.appendChild(secHeader);
 
             renderHarnessSummary(pane, scope);

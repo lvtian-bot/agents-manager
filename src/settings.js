@@ -1,4 +1,4 @@
-const { PluginSettingTab, Setting, Notice, FuzzySuggestModal, Menu } = require("obsidian");
+const { PluginSettingTab, Setting, Notice, FuzzySuggestModal } = require("obsidian");
 const path = require("path");
 const fs = require("fs");
 
@@ -10,7 +10,6 @@ const harnessTargets = {
 
 const defaultSkillUserTargets = {
     Claude: "~/.claude/skills",
-    Antigravity: "~/.gemini/config/skills",
 };
 
 const defaultSkillProjectTargets = {
@@ -128,44 +127,6 @@ function required(value) {
     return value;
 }
 
-function harnessCards(parent, plugin) {
-    const selected = new Map(Object.entries(plugin.settings.targets));
-    const available = () => Object.keys(harnessTargets).filter(name => !selected.has(name));
-    const section = parent.createDiv();
-    const heading = new Setting(section).setName("用户指令目标");
-    const grid = section.createDiv();
-    grid.style.cssText = "display:grid;gap:8px;grid-template-columns:repeat(auto-fill,minmax(min(100%,max(9rem,calc((100% - 16px) / 3))),1fr))";
-    let addButton;
-    function render() {
-        grid.empty();
-        for (const name of selected.keys()) {
-            const card = grid.createDiv();
-            card.style.cssText = "position:relative;display:flex;align-items:center;min-height:3em;padding:8px 30px 8px 12px;border:1px solid var(--background-modifier-border);border-radius:var(--radius-m);background:var(--background-secondary);overflow-wrap:anywhere";
-            card.createEl("span", { text: name });
-            const remove = card.createEl("button", { text: "×", cls: "clickable-icon", attr: { type: "button", "aria-label": "移除 " + name } });
-            remove.style.cssText = "position:absolute;top:2px;right:2px;width:24px;height:24px;color:var(--text-muted)";
-            remove.onclick = () => { selected.delete(name); render(); addButton.buttonEl.focus(); };
-        }
-        addButton.setDisabled(!available().length);
-    }
-    heading.addButton(button => {
-        addButton = button;
-        button.setButtonText("添加目标").onClick(() => {
-            const menu = new Menu();
-            for (const name of available()) {
-                menu.addItem(item => item.setTitle(name).onClick(() => {
-                    if (!selected.has(name)) selected.set(name, harnessTargets[name]);
-                    render();
-                }));
-            }
-            const bounds = button.buttonEl.getBoundingClientRect();
-            menu.showAtPosition({ x: bounds.left, y: bounds.bottom }, button.buttonEl.ownerDocument);
-        });
-    });
-    render();
-    return () => Object.fromEntries(selected);
-}
-
 class ManagerSettings extends PluginSettingTab {
     constructor(plugin) {
         super(plugin.app, plugin);
@@ -251,13 +212,10 @@ class ManagerSettings extends PluginSettingTab {
 
         container.createEl("h3", { text: "分发与回收指令" });
         field(container, "userSource", "用户指令源笔记", "选择要分发给各工具的笔记。", vaultPath);
-        readers.set("targets", harnessCards(container, plugin));
         field(container, "workSource", "Work 项目模板", "同步前两个一级标题之间的区块。", vaultPath);
         field(container, "codeSource", "Code 项目模板", "各项目的目标在同步面板中登记。", vaultPath);
 
         container.createEl("h3", { text: "技能管理" });
-        mapping(container, "skillUserTargets", "用户级技能分发目标", "工具名称", "技能目录", "添加目标", skillUserPath);
-        mapping(container, "skillProjectTargets", "项目级技能分发目标", "工具名称", "相对技能目录", "添加目标", skillProjectPath);
         const githubGroup = disclosure(container, "GitHub 更新凭据");
         field(githubGroup, "githubCredentialVariable", "GitHub 凭据环境变量名", "可选，留空时匿名访问 GitHub API（每小时限 60 次）。只填写变量名。", envVariableName);
 
@@ -294,14 +252,13 @@ class ManagerSettings extends PluginSettingTab {
             clearError();
             button.setDisabled(true);
             try {
-                const updated = { ...plugin.settings };
+                const patch = {};
                 for (const [key, getValue] of readers) {
                     if (single.hidden && key === "singleTemplate") continue;
                     if (multiple.hidden && ["typeProperty", "templates", "defaultTemplate"].includes(key)) continue;
-                    updated[key] = getValue();
+                    patch[key] = getValue();
                 }
-                await plugin.saveData(updated);
-                plugin.settings = updated;
+                await plugin.updateSettings(current => ({ ...current, ...patch }));
                 new Notice("设置已保存。");
             } catch (error) {
                 if (!invalidInput) new Notice("设置保存失败。");
@@ -311,4 +268,13 @@ class ManagerSettings extends PluginSettingTab {
         }));
     }
 }
-module.exports = { loadSettings, ManagerSettings, defaultSkillUserTargets, defaultSkillProjectTargets };
+module.exports = {
+    loadSettings,
+    ManagerSettings,
+    harnessTargets,
+    defaultSkillUserTargets,
+    defaultSkillProjectTargets,
+    skillUserPath,
+    skillProjectPath,
+    required,
+};

@@ -49,6 +49,18 @@ module.exports = class AgentsManager extends Plugin {
         catch (error) { new Notice(error.message || "操作未完成。"); }
     }
 
+    updateSettings(buildNext) {
+        const run = (this._settingsQueue || Promise.resolve()).then(async () => {
+            const next = await buildNext({ ...(this.settings || {}) });
+            if (!next) return this.settings;
+            await this.saveData(next);
+            this.settings = next;
+            return next;
+        });
+        this._settingsQueue = run.catch(() => {});
+        return run;
+    }
+
     openDialog(title, onClose) {
         const modal = new Modal(this.app);
         modal.setTitle(title);
