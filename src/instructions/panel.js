@@ -496,11 +496,9 @@ function mountInstructions(plugin, host) {
         };
 
         channel.labels = {
-            initialCreateButton: "从模板生成完整文件",
             recycle: "回收\n项目改动",
             overwriteExisting: "覆盖\n项目改动",
-            merge: "逐行\n合并",
-            overwriteMissing: "用模板重新生成完整文件"
+            merge: "逐行\n合并"
         };
 
         return channel;
@@ -777,6 +775,9 @@ function mountInstructions(plugin, host) {
         assertSourceUnchanged(target);
         const external = channel.readTargetSection(target.path);
         const source = channel.readSourceDocument(app);
+        if (hashText(external) !== target.currentHash || source.section !== target.source.section) {
+            throw new Error(channel.text.changedDuringDialog + target.path);
+        }
         const changes = changeSet();
         if (source.section !== external) {
             changes.document("note", channel.sourceVaultPath, source.composeSourceText(external));
@@ -997,8 +998,7 @@ function mountInstructions(plugin, host) {
 
     // ===== 统一面板 =====
 
-    // 冲突卡片的双向按钮组：主按钮随分歧来源确定——只有一侧改过时指向该侧方向，
-    // 两侧都改过时主按钮为行级对比合并；目标文件被删除时只剩重建一个动作。
+    // 用户级目标沿用原有的冲突操作顺序和文件重建入口。
     function buildConflictButtons(spec) {
         if (!spec.fileExists) {
             return [{ label: spec.overwriteLabel, primary: true, run: spec.overwriteRun }];
@@ -1029,16 +1029,29 @@ function mountInstructions(plugin, host) {
                 new Notice(message);
                 return onChanged ? onChanged() : undefined;
             };
-            var canMerge = ["conflict", "initial-review"].indexOf(target.action) >= 0 && fileExists;
-            var openMerge = canMerge ? function () {
+            const isProject = channel !== USER_CHANNEL;
+            const hasDifferences = fileExists && target.currentHash !== null &&
+                ["sync", "initial-review", "conflict"].includes(target.action);
+            var openMerge = async function () {
                 if (target.sourceVaultPath && channel.sourceVaultPath !== target.sourceVaultPath) {
                     return showMessage("行级对比失败", "源笔记设置已变化，请先点击「刷新」再操作。").then(function () { return "error"; });
                 }
                 return showMergeModal(buildChannelMergeConfig(channel, target, app));
-            } : null;
+            };
             var afterMerge = onChanged ? function () { return onChanged(); } : null;
 
-            if (target.action === "sync") {
+            if (isProject) {
+                const preferMerge = hasDifferences && (target.action === "initial-review" || target.sourceChangedSinceSync);
+                const preferRecycle = hasDifferences && target.action === "conflict" && !preferMerge;
+                const canDistribute = hasDifferences || target.action === "record-only" ||
+                    (!fileExists && ["initial-create", "conflict"].includes(target.action));
+                buttons = [
+                    { label: labels.recycle, primary: preferRecycle, disabled: !hasDifferences, run: recycle, afterSuccess },
+                    { label: labels.overwriteExisting, primary: canDistribute && !preferRecycle && !preferMerge,
+                        disabled: !canDistribute, run: distribute, afterSuccess },
+                    { label: labels.merge, primary: preferMerge, disabled: !hasDifferences, openMerge, afterMerge }
+                ];
+            } else if (target.action === "sync") {
                 buttons.push({ label: "备份并分发", primary: true, run: distribute, afterSuccess: afterSuccess });
             } else if (target.action === "initial-create") {
                 buttons.push({ label: labels.initialCreateButton, primary: true, run: distribute, afterSuccess: afterSuccess });
@@ -1086,6 +1099,7 @@ function mountInstructions(plugin, host) {
                 pathText: target.displayPath,
                 reason: target.reason,
                 statusText: statusText,
+                fixedActions: isProject,
                 buttons: buttons,
                 removeEntry: removeEntry
             });
@@ -1378,7 +1392,9 @@ function mountInstructions(plugin, host) {
                 button.className = "mod-cta";
             }
 
-            if (entry.openMerge) {
+            if (entry.disabled) {
+                button.disabled = true;
+            } else if (entry.openMerge) {
                 button.onclick = function () {
                     button.disabled = true;
                     entry.openMerge().then(async function (result) {
@@ -1390,6 +1406,9 @@ function mountInstructions(plugin, host) {
                             if (entry.afterMerge) await entry.afterMerge(result);
                         }
                         button.disabled = result === "applied" || result === "noop";
+                    }).catch(function (error) {
+                        status.textContent = "未完成：" + (error.message || String(error));
+                        button.disabled = false;
                     });
                 };
             } else {
@@ -1399,7 +1418,7 @@ function mountInstructions(plugin, host) {
                     try {
                         var resultMessage = await entry.run();
                         status.textContent = resultMessage;
-                        button.textContent = "已完成";
+                        if (!card.fixedActions) button.textContent = "已完成";
                         button.className = "";
                         // 一个动作成功后卡片状态已改变，其余一键动作基于的是过期内容，全部停用。
                         runButtons.forEach(function (other) {
@@ -1411,9 +1430,9 @@ function mountInstructions(plugin, host) {
                         button.disabled = false;
                     }
                 };
-                runButtons.push(button);
             }
 
+            runButtons.push(button);
             buttonRow.appendChild(button);
         });
 
