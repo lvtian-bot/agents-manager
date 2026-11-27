@@ -1,3 +1,5 @@
+const { createHash } = require("node:crypto");
+
 const modelPresets = {
     deepseek: {
         label: "DeepSeek 官方",
@@ -18,19 +20,37 @@ function modelPreset(id) {
     return Object.hasOwn(modelPresets, id) ? modelPresets[id] : null;
 }
 
-function getModelConnection(app, settings) {
-    const preset = modelPreset(settings.modelConnection);
-    if (preset) {
-        const credential = app.secretStorage.getSecret(preset.secretId);
-        if (!credential) throw new Error("请在模型设置中保存 API Key。");
-        return { ...preset, credential };
+function modelEndpoint(value) {
+    let url;
+    try { url = new URL(value); } catch { throw new Error("请填写完整的模型接口地址。"); }
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) {
+        throw new Error("模型接口须使用 HTTPS 或本机地址。");
     }
-    if (settings.modelConnection !== "custom") throw new Error("请在模型设置中选择模型。");
-    const { endpoint, model, credentialVariable } = settings;
-    if (!endpoint) throw new Error("请填写完整的模型接口地址。");
-    if (!model) throw new Error("此项不能为空。");
-    if (!credentialVariable) throw new Error("请填写有效的环境变量名。");
-    return { endpoint, model, credentialVariable };
+    if (url.username || url.password || url.search || url.hash) throw new Error("请单独配置请求凭据。");
+    return url.href;
 }
 
-module.exports = { modelPresets, modelPreset, getModelConnection };
+function modelSecretId(selection, endpoint) {
+    const preset = modelPreset(selection);
+    if (preset) return preset.secretId;
+    if (selection !== "custom" || !endpoint) return null;
+    let normalized;
+    try { normalized = modelEndpoint(endpoint); } catch { return null; }
+    return "agents-manager-custom-" + createHash("sha256").update(normalized).digest("hex");
+}
+
+function getModelConnection(app, settings) {
+    const { modelConnection, endpoint, model } = settings;
+    let connection = modelPreset(modelConnection);
+    if (!connection) {
+        if (modelConnection !== "custom") throw new Error("请在模型设置中选择模型。");
+        const address = modelEndpoint(endpoint);
+        if (!model) throw new Error("此项不能为空。");
+        connection = { endpoint: address, model };
+    }
+    const credential = app.secretStorage.getSecret(modelSecretId(modelConnection, connection.endpoint));
+    if (!credential) throw new Error("请在模型设置中保存 API Key。");
+    return { ...connection, credential };
+}
+
+module.exports = { modelPresets, modelPreset, modelEndpoint, modelSecretId, getModelConnection };

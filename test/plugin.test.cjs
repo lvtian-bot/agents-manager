@@ -8,6 +8,11 @@ const { runInNewContext } = require("node:vm");
 
 const bundle = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
 
+function fixtureModelSecrets(endpoint) {
+    const id = "agents-manager-custom-" + createHash("sha256").update(new URL(endpoint).href).digest("hex");
+    return new Map([[id, "test-key"]]);
+}
+
 class Element {
     constructor(tag) {
         this.tag = tag;
@@ -27,9 +32,13 @@ class Element {
     }
 
     remove() {
+        if (!this.parent) return;
         const siblings = this.parent.children;
         siblings.splice(siblings.indexOf(this), 1);
+        this.parent = null;
     }
+
+    get parentElement() { return this.parent ?? null; }
 
     addEventListener() {}
     setAttribute(key, value) { (this.attributes ??= {})[key] = value; }
@@ -214,7 +223,14 @@ async function loadPlugin(app, options = {}) {
                     showAtPosition() { options.menu(this.items); }
                 }
                 const setIcon = (element, icon) => element.setAttribute("data-icon", icon);
-                return { Notice, Plugin, Modal, ItemView, Setting, Menu, ToggleComponent, setIcon, PluginSettingTab: class {}, FuzzySuggestModal: class {
+                const getFrontMatterInfo = text => ({ contentStart: text.match(/^---\n[\s\S]*?\n---(?:\n|$)/)?.[0].length ?? 0 });
+                const MarkdownRenderer = { render: options.renderMarkdown };
+                const Component = class {
+                    load() { this.loaded = true; }
+                    unload() { this.loaded = false; }
+                };
+                return { Notice, Plugin, Modal, ItemView, Setting, Menu, ToggleComponent, setIcon, Component,
+                    getFrontMatterInfo, MarkdownRenderer, PluginSettingTab: class {}, FuzzySuggestModal: class {
                     constructor(app) { this.app = app; }
                     open() { options.pick(this); }
                     onClose() {}
@@ -232,7 +248,7 @@ async function loadPlugin(app, options = {}) {
             }
             return require(name);
         },
-        process: { platform: process.platform, env: { TEST_MODEL_API_KEY: "test-key", ...(options.env || {}) } },
+        process: { platform: process.platform },
         console: { log() {}, error: (error) => assert.fail(String(error)) },
         fetch: options.fetch,
         Buffer, TextDecoder, URL, URLSearchParams, AbortController,
@@ -312,7 +328,8 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
         assert.equal(fields("模型")[0].value, "custom");
         assert.equal(fields("模型接口")[0].value, "https://legacy.example.org/v1/chat/completions");
         assert.equal(fields("模型名称")[0].value, "saved-model");
-        assert.equal(fields("凭据环境变量名")[0].value, "SAVED_API_KEY");
+        assert.equal(fields("凭据环境变量名").length, 0);
+        assert.equal(fields("API Key")[0].value, "");
         assert.equal(nodes(element => element.tag === "details").length, 0);
         assert.equal(button("保存设置"), undefined);
         fields("选择未匹配时使用的提示词")[0].onclick();
@@ -327,7 +344,7 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
         assert.equal(saved[1].targets.Codex, "~/.codex/AGENTS.md");
         assert.equal(saved[1].extra, 7);
         assert.equal(saved[1].model, "saved-model");
-        assert.equal(saved[1].credentialVariable, "SAVED_API_KEY");
+        assert.equal(Object.hasOwn(saved[1], "credentialVariable"), false);
         assert.equal(saved[1].endpoint, "https://example.org/v1/chat/completions");
         assert.deepEqual(notices, []);
         tab.display();
@@ -401,7 +418,8 @@ test("全新安装可在各指令同步标签页设置来源，模型连接留�
     const field = label => findElements(root, el => el.getAttribute("aria-label") === label)[0];
     assert.equal(field("模型").value, "");
     assert.equal(field("API Key").parent.parent.hidden, true);
-    for (const label of ["模型接口", "模型名称", "凭据环境变量名"]) assert.equal(field(label).value, "");
+    for (const label of ["模型接口", "模型名称"]) assert.equal(field(label).value, "");
+    assert.equal(field("凭据环境变量名"), undefined);
 
     const source = label => findElements(body, el => el.getAttribute("aria-label") === label)[0];
     const buttonIn = (container, label) =>
@@ -445,7 +463,7 @@ test("全新安装可在各指令同步标签页设置来源，模型连接留�
     assert.equal(findElements(body, el => /user-instructions-sync\.json|instruction-projects\.json/.test(el.textContent)).length, 0);
     assert.equal(saved[0].endpoint, "");
     assert.equal(saved[0].model, "");
-    assert.equal(saved[0].credentialVariable, "");
+    assert.equal(Object.hasOwn(saved[0], "credentialVariable"), false);
 
     plugin.app.workspace.getActiveFile = () => ({ path: "笔记.md" });
     await plugin.app.workspace.getLeavesOfType("agents-manager-workspace")[0].detach();
@@ -509,7 +527,7 @@ test("模型预设分别保存密钥，选择后向对应接口发起请求", as
     await invoke("summarize-note");
     assert.deepEqual(notices, ["请在模型设置中保存 API Key。"]);
     assert.equal(requests.length, 0);
-    save.onclick();
+    await save.onclick();
     assert.equal(key.value, "");
     assert.equal(key.placeholder, "••••••••");
     await invoke("summarize-note");
@@ -519,7 +537,7 @@ test("模型预设分别保存密钥，选择后向对应接口发起请求", as
     await invoke("translate-selection");
     assert.equal(requests.length, 1);
     key.value = "siliconflow-fixture";
-    save.onclick();
+    await save.onclick();
     await invoke("translate-selection");
     assert.equal(findElements(body, el => el.tag === "textarea").at(-1).value, "流式结果");
     await choose("deepseek");
@@ -537,6 +555,72 @@ test("模型预设分别保存密钥，选择后向对应接口发起请求", as
     assert.equal(secrets.size, 2);
     assert.equal(saved.length, 3);
     assert.doesNotMatch(JSON.stringify(saved), /deepseek-fixture|siliconflow-fixture/);
+});
+
+test("自定义连接使用 API Key，切换接口地址不会使用另一地址的密钥", async () => {
+    const endpoint = "https://example.org/v1/chat/completions";
+    const otherEndpoint = "https://example.org/other/chat/completions";
+    const secrets = new Map();
+    const saved = [];
+    const notices = [];
+    const requests = [];
+    const app = {
+        workspace: {
+            getActiveFile: () => ({ path: "笔记.md" }),
+            activeEditor: { editor: { getSelection: () => "Selected text", getValue: () => "笔记正文" } },
+        },
+    };
+    const { plugin, invoke } = await loadPlugin(app, {
+        secrets, notices, save: data => saved.push(data),
+        settings: { endpoint, model: "custom-model", credentialVariable: "OLD_API_KEY" },
+        async fetch(url, request) {
+            requests.push([url, request.headers.Authorization]);
+            return { ok: true, json: async () => ({ choices: [{ message: { content: "结果" } }] }) };
+        },
+    });
+    const tab = plugin.settingTab;
+    const root = tab.containerEl = new Element("div");
+    const field = label => findElements(root, el => el.getAttribute("aria-label") === label)[0];
+    tab.display();
+    assert.equal(field("模型").value, "custom");
+    assert.equal(field("API Key").parent.parent.hidden, false);
+    assert.equal(field("凭据环境变量名"), undefined);
+    const address = field("模型接口");
+    const key = field("API Key");
+    const save = findElements(root, el => el.tag === "button" && el.textContent === "保存")[0];
+    await invoke("summarize-note");
+    assert.deepEqual(notices, ["请在模型设置中保存 API Key。"]);
+    assert.equal(requests.length, 0);
+    key.value = "custom-key-fixture";
+    await save.onclick();
+    assert.equal(key.value, "");
+    assert.equal(key.placeholder, "••••••••");
+    await invoke("summarize-note");
+
+    key.value = "unsaved-key-fixture";
+    address.value = otherEndpoint;
+    await address.onchange();
+    assert.equal(key.value, "");
+    assert.equal(key.placeholder, "API Key");
+    await invoke("translate-selection");
+    assert.equal(requests.length, 1);
+    assert.equal(notices.at(-1), "请在模型设置中保存 API Key。");
+    key.value = "other-key-fixture";
+    await save.onclick();
+    await invoke("translate-selection");
+
+    address.value = "https://EXAMPLE.org:443/v1/chat/completions";
+    await address.onchange();
+    assert.equal(key.placeholder, "••••••••");
+    await invoke("summarize-note");
+    assert.deepEqual(requests, [
+        [endpoint, "Bearer custom-key-fixture"],
+        [otherEndpoint, "Bearer other-key-fixture"],
+        [endpoint, "Bearer custom-key-fixture"],
+    ]);
+    assert.equal(secrets.size, 2);
+    assert.equal(Object.hasOwn(saved.at(-1), "credentialVariable"), false);
+    assert.doesNotMatch(JSON.stringify(saved), /key-fixture/);
 });
 
 test("没有选区时翻译只提示，不发起模型请求", async () => {
@@ -592,10 +676,12 @@ test("AI 命令保持选区翻译、按类型总结及流式内容写回", async
             },
         };
 
+        const endpoint = "https://example.org/v1/chat/completions";
         const plugin = await loadPlugin(app, {
+            secrets: fixtureModelSecrets(endpoint),
             settings: {
-                endpoint: "https://example.org/v1/chat/completions",
-                model: "my-model", credentialVariable: "TEST_MODEL_API_KEY",
+                endpoint,
+                model: "my-model",
                 typeProperty: "文章类型",
                 ...(mode ? { summaryMode: mode, singleTemplate: "docs/prompts/文献总结-单独.md" } : {}),
                 templates: { 新闻报道: "docs/prompts/文献总结-新闻简讯.md", 观点视角: "docs/prompts/文献总结-观点视角.md", 知识教程: "docs/prompts/文献总结-知识教程.md" },
@@ -1562,6 +1648,7 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
 
     const binaryBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
     const notices = [];
+    const previews = [];
 
     const plugin = await loadPlugin({
         workspace: { getActiveFile: () => null, getLeavesOfType: () => [] },
@@ -1569,6 +1656,11 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     }, {
         fixtureDir,
         notices,
+        async renderMarkdown(_app, markdown, container, _sourcePath, component) {
+            assert.equal(component.loaded, true);
+            previews.push({ markdown, component });
+            container.createEl("p", { text: "渲染后的正文" });
+        },
         settings: {
             userSource: "用户指令.md",
             workSource: "Work模板.md",
@@ -1711,20 +1803,35 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.match(userTable.style.cssText, /table-layout:fixed/);
     assert.equal(userTable.style.cssText, projectTable.style.cssText);
     const projectHeaders = findElements(projectTable, n => n.tag === "thead")[0].children[0].children;
-    assert.equal(projectHeaders[3].getAttribute("aria-hidden"), "true");
-    assert.equal(projectHeaders[3].colSpan, 1);
-    assert.equal(projectHeaders[4].textContent, "Claude");
-    assert.match(projectHeaders[4].style.cssText, /text-align:right/);
+    assert.equal(projectHeaders[1].getAttribute("aria-hidden"), "true");
+    assert.equal(projectHeaders[4].getAttribute("aria-hidden"), "true");
+    assert.equal(projectHeaders[4].colSpan, 1);
+    assert.equal(projectHeaders[5].textContent, "Claude");
+    assert.match(projectHeaders[5].style.cssText, /text-align:right/);
     const projectRow = findElements(projectTable, n => n.tag === "tbody")[0].children[0];
-    assert.equal(projectRow.children[3].getAttribute("aria-hidden"), "true");
-    assert.match(projectRow.children[4].children[0].style.cssText, /justify-content:flex-end/);
+    assert.equal(projectRow.children[4].getAttribute("aria-hidden"), "true");
+    assert.match(projectRow.children[5].children[0].style.cssText, /justify-content:flex-end/);
     sButton("项目A（1）").onclick();
     assert.equal(userTable.parent.parent.style.display, "none");
     assert.equal(projectTable.parent.parent.style.display, "");
     sButton("用户级技能（4）").onclick();
 
-    // 3. 自建技能编辑与撤销
-    sButton("编辑").onclick();
+    // 3. 从技能名称打开渲染正文，铅笔图标进入自建技能编辑
+    await sButton("alpha-skill").onclick();
+    const [preview] = previews;
+    assert.equal(preview.markdown.trim(), "# Alpha\n初始正文");
+    const [readingModal] = plugin.plugin.modals;
+    assert.equal(readingModal.titleEl.textContent, "查看技能：alpha-skill");
+    assert.equal(readingModal.contentEl.children[0].className, "markdown-rendered");
+    assert.equal(textIncludes("渲染后的正文").length, 1);
+    assert.equal(findElements(readingModal.contentEl, node => ["textarea", "input", "button"].includes(node.tag)).length, 0);
+    readingModal.close();
+    assert.equal(preview.component.loaded, false);
+    const alphaRow = sButton("alpha-skill").closest("tr");
+    const editButton = alphaRow.children[3].children[0];
+    assert.equal(editButton.getAttribute("data-icon"), "pencil");
+    assert.equal(editButton.getAttribute("aria-label"), "编辑");
+    editButton.onclick();
     const editor = findElements(plugin.body, node => node.tag === "textarea")[0];
     assert.match(editor.value, /初始正文/);
     editor.value = "---\nname: alpha-skill\ndescription: 修改后的 Alpha 说明。\n---\n\n# Alpha\n新版正文\n";
@@ -1833,8 +1940,11 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
         "https://github.com/openclaw/gogcli/tree/1111111111111111111111111111111111111111/.agents/skills/gog @ 1111111111111111111111111111111111111111";
     await sButton("保存").onclick();
     assert.equal(typeFor("gog").value, "github");
-    assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "编辑").length, 4);
-    assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "查看").length, 5);
+    assert.equal(findElements(skillsHost, node => node.tag === "button" && ["编辑", "查看"].includes(node.textContent)).length, 0);
+    assert.equal(findElements(skillsHost, node => node.getAttribute("data-icon") === "pencil").length, 5);
+    await sButton("gog").onclick();
+    assert.equal(previews[1].markdown.trim(), "旧版本");
+    [...plugin.plugin.modals][0].close();
     const sourceButtons = findElements(skillsHost, node => node.tag === "button" && node.getAttribute("aria-label") === "修改链接");
     assert.equal(sourceButtons.length, 1);
     const [sourceButton] = sourceButtons;
@@ -1846,19 +1956,21 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     sButton("取消").onclick();
     assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "设置来源").length, 0);
     const gogRow = typeFor("gog").parent.parent;
-    assert.equal(gogRow.children.length, 5);
-    assert.equal(findElements(gogRow.children[2], node => node.textContent === "更新").length, 1);
-    assert.equal(linkSwitch("gog", "CustomTool").closest("td"), gogRow.children[4]);
-    assert.notEqual(sButton("更新").className, "mod-cta");
+    assert.equal(gogRow.children.length, 6);
+    assert.equal(gogRow.children[1].children.length, 0);
+    assert.equal(typeFor("gog").parent, gogRow.children[2]);
+    assert.deepEqual(gogRow.children[3].children, [sourceButton]);
+    assert.equal(linkSwitch("gog", "CustomTool").closest("td"), gogRow.children[5]);
 
     await sButton("检查更新").onclick();
     assert.ok(skillsTextIncludes("发现新版本：2222222").length > 0);
     assert.equal(sButton("更新").className, "mod-cta");
+    assert.deepEqual(gogRow.children[1].children, [sButton("更新")]);
+    assert.deepEqual(gogRow.children[3].children, [sourceButton]);
 
     // 点击「更新」直接更新（无安全确认弹窗）
     await sButton("更新").onclick();
-    assert.notEqual(sButton("更新").className, "mod-cta");
-    assert.equal(sButton("更新").disabled, true);
+    assert.equal(typeFor("gog").closest("tr").children[1].children.length, 0);
     assert.match(read(path.join(userSkillsRoot, "gog", "SKILL.md")), /新版 Google CLI/);
     assert.deepEqual(fs.readFileSync(path.join(userSkillsRoot, "gog", "assets", "icon.bin")), binaryBytes);
     assert.equal(fs.existsSync(path.join(userSkillsRoot, "gog", ".github")), false);
@@ -1876,7 +1988,7 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     const restoredSources = JSON.parse(read(path.join(syncDir, "skills-sources.json")));
     assert.equal(restoredSources.skills["user/gog"].commit, "1111111111111111111111111111111111111111");
     assert.equal(sButton("更新").className, "mod-cta");
-    assert.equal(sButton("更新").disabled, false);
+    assert.ok(!sButton("更新").disabled);
 
     await plugin.closeWorkspace();
     assert.equal(plugin.body.children.length, 0);
@@ -1914,19 +2026,19 @@ test("技能更新先显示列表，打开时按来源复用一天的结果，�
     const tick = () => new Promise(resolve => setImmediate(resolve));
     let plugin = await startup();
     const buttons = label => findElements(plugin.body, node => node.tag === "button" && node.textContent === label);
-    const colors = () => buttons("更新").map(button => button.className === "mod-cta");
+    const updateSkills = () => buttons("更新").map(button => button.closest("tr").children[0].children[0].children[0].textContent);
     await plugin.invoke("manage-skills");
     assert.equal(requests, 1);
-    assert.deepEqual(colors(), [false, false, false]);
+    assert.deepEqual(updateSkills(), []);
     assert.ok(!plugin.plugin.skillsBusy);
-    const updateBeforeCheck = buttons("更新")[1].onclick();
     const firstCheck = buttons("检查更新")[0].onclick();
     assert.equal(requests, 1);
     success();
-    await Promise.all([firstCheck, updateBeforeCheck]);
-    assert.deepEqual(colors(), [true, false, false]);
-    assert.deepEqual(buttons("更新").map(button => button.disabled), [false, true, false]);
-    await buttons("更新")[1].onclick();
+    await firstCheck;
+    assert.deepEqual(updateSkills(), ["alpha"]);
+    assert.ok(!buttons("更新")[0].disabled);
+    assert.ok(findElements(plugin.body, node => node.textContent === "已是最新（2222222）").length);
+    assert.ok(findElements(plugin.body, node => node.textContent === "基线未知，最新提交：2222222").length);
     assert.equal(requests, 1);
     assert.equal(localStorage.size, 1);
 
@@ -1934,29 +2046,29 @@ test("技能更新先显示列表，打开时按来源复用一天的结果，�
     plugin = await startup();
     await plugin.invoke("manage-skills");
     assert.equal(requests, 1);
-    assert.deepEqual(colors(), [true, false, false]);
+    assert.deepEqual(updateSkills(), ["alpha"]);
     const manual = buttons("检查更新")[0].onclick();
     assert.equal(requests, 2);
     finishRequest({ ok: false, status: 429, text: async () => "" });
     await manual;
-    assert.deepEqual(colors(), [false, false, false]);
+    assert.deepEqual(updateSkills(), []);
     assert.ok(findElements(plugin.body, node => node.textContent === "检查失败：GitHub 请求过于频繁，请稍后再试。").length);
 
     await plugin.invoke("manage-skills");
     assert.equal(requests, 3);
     success();
     await tick();
-    assert.deepEqual(colors(), [true, false, false]);
+    assert.deepEqual(updateSkills(), ["alpha"]);
     await plugin.closeWorkspace();
     const [key, entry] = [...localStorage][0];
     localStorage.set(key, { ...entry, checkedAt: Date.now() - 24 * 60 * 60 * 1000 });
     plugin = await startup();
     await plugin.invoke("manage-skills");
     assert.equal(requests, 4);
-    assert.deepEqual(colors(), [false, false, false]);
+    assert.deepEqual(updateSkills(), []);
     success();
     await tick();
-    assert.deepEqual(colors(), [true, false, false]);
+    assert.deepEqual(updateSkills(), ["alpha"]);
     assert.equal(notices.length, 2);
     assert.equal(fs.existsSync(path.join(sync, "skills-last-operation.json")), false);
     await plugin.closeWorkspace();
@@ -2064,7 +2176,7 @@ test("PR 审查回归：并发编辑不回滚外部改动、GitHub 更新保留�
     await plugin.invoke("manage-skills");
 
     // 1. 并发编辑：前置检查失败绝不能用旧内容覆盖外部修改，也不残留 pending 记录
-    sButton("编辑").onclick();
+    findElements(sButton("self-skill").closest("tr"), node => node.getAttribute("aria-label") === "编辑")[0].onclick();
     const editor = findElements(plugin.body, node => node.tag === "textarea")[0];
     editor.value = "---\nname: self-skill\ndescription: 弹窗修改\n---\n弹窗内容\n";
     write(selfMd, "---\nname: self-skill\ndescription: 外部最新\n---\n外部最新正文\n");
@@ -2457,13 +2569,16 @@ test("PR 复审回归：拒绝上游软链接条目并正确解析含斜杠分�
     await plugin.invoke("manage-skills");
 
     // 1. slash-skill 排在 sym-skill 之前（alphabetical）：先验证含斜杠分支可正确检查和更新
+    await sButtons("检查更新")[0].onclick();
     await sButtons("更新")[0].onclick();
     assert.match(read(path.join(slashSkillDir, "SKILL.md")), /新分支内容/);
     const sources = JSON.parse(read(path.join(syncDir, "skills-sources.json")));
     assert.equal(sources.skills["user/slash-skill"].commit, "6666666666666666666666666666666666666666");
 
     // 2. sym-skill 上游含 120000 软链接条目时拒绝更新，本地文件与基线均不变
-    const blockedSym = sButtons("更新")[1].onclick();
+    const [symUpdate] = sButtons("更新");
+    assert.equal(symUpdate.closest("tr"), sButtons("sym-skill")[0].closest("tr"));
+    const blockedSym = symUpdate.onclick();
     await tick();
     assert.ok(findElements(plugin.body, n => n.textContent?.includes("不支持的软链接条目")).length > 0);
     sButtons("关闭")[0].onclick();
@@ -2655,7 +2770,7 @@ test("技能管理自动纳入当前 Obsidian 仓库技能，支持去重、分�
 
     // 2. 当前仓库自建编辑、GitHub 更新与按项目级目标一键分发 + 撤销
     sButton("知识库名称（2）").onclick();
-    sButton("编辑", 1).onclick();
+    findElements(sButton("vault-skill").closest("tr"), node => node.getAttribute("aria-label") === "编辑")[0].onclick();
     const editor = findElements(plugin.body, node => node.tag === "textarea")[0];
     editor.value = "---\nname: vault-skill\ndescription: 仓库技能新说明\n---\n\n# Vault\n新内容\n";
     editor.oninput();
@@ -2743,10 +2858,10 @@ test("笔记 AI 处理覆盖请求取消、接口错误及生成期间切换或�
     const baseSettings = {
         endpoint: "https://example.org/v1/chat/completions",
         model: "my-model",
-        credentialVariable: "TEST_MODEL_API_KEY",
         summaryMode: "single",
         singleTemplate: "",
     };
+    const secrets = fixtureModelSecrets(baseSettings.endpoint);
 
     // 1. 请求取消：fetch 挂起期间点击「放弃」，应中止请求且无错误 Notice、不写回
     {
@@ -2769,7 +2884,7 @@ test("笔记 AI 处理覆盖请求取消、接口错误及生成期间切换或�
         };
         const plugin = await loadPlugin(app, {
             notices,
-            settings: baseSettings,
+            settings: baseSettings, secrets,
             fetch(_url, req) {
                 capturedSignal = req.signal;
                 return new Promise((resolve, reject) => {
@@ -2811,7 +2926,7 @@ test("笔记 AI 处理覆盖请求取消、接口错误及生成期间切换或�
         };
         const plugin = await loadPlugin(app, {
             notices,
-            settings: baseSettings,
+            settings: baseSettings, secrets,
             async fetch(_url, req) {
                 return {
                     ok: true,
@@ -2894,12 +3009,6 @@ test("笔记 AI 处理覆盖请求取消、接口错误及生成期间切换或�
                 json: async () => ({ choices: [{ message: { content: "   " } }] }),
             }),
         },
-        {
-            name: "缺少凭据环境变量",
-            expected: "MISSING_KEY_VAR",
-            settings: { ...baseSettings, credentialVariable: "MISSING_KEY_VAR" },
-            fetch: async () => assert.fail("缺少凭据时不应发起请求"),
-        },
     ];
 
     for (const item of errorCases) {
@@ -2912,7 +3021,7 @@ test("笔记 AI 处理覆盖请求取消、接口错误及生成期间切换或�
             vault: { async read() { return "正文"; } },
         }, {
             notices,
-            settings: item.settings || baseSettings,
+            settings: baseSettings, secrets,
             fetch: item.fetch,
         });
         await plugin.invoke("summarize-note");
@@ -2956,7 +3065,7 @@ test("笔记 AI 处理覆盖请求取消、接口错误及生成期间切换或�
         };
         const plugin = await loadPlugin(app, {
             notices,
-            settings: baseSettings,
+            settings: baseSettings, secrets,
             async fetch() {
                 if (scenario === "switch-file") currentFile = { path: "笔记B.md" };
                 else if (scenario === "edit-content") currentText = "生成期间被修改";

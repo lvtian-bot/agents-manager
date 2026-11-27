@@ -1,5 +1,5 @@
 const fs = require("fs");
-const { Menu, Notice, setIcon, ToggleComponent } = require("obsidian");
+const { Component, getFrontMatterInfo, MarkdownRenderer, Menu, Notice, setIcon, ToggleComponent } = require("obsidian");
 const { createWorkspaceToolbar, createWorkspaceFooter } = require("../workspace-controls");
 const { readText, replaceText } = require("../instructions/storage");
 const { skillUserPath, skillProjectPath, required } = require("../settings");
@@ -38,8 +38,9 @@ const SKILL_CELL_STYLE =
 const SKILL_ACTION_STYLE =
     "font-size:var(--am-font-control);padding:3px 7px;min-height:28px;height:auto;white-space:nowrap;";
 const SKILL_NAME_MIN_WIDTH = 188;
-const SKILL_TYPE_WIDTH = 116;
-const SKILL_ACTION_WIDTH = 152;
+const SKILL_UPDATE_WIDTH = 64;
+const SKILL_TYPE_WIDTH = 94;
+const SKILL_ACTION_WIDTH = 48;
 const SKILL_HARNESS_WIDTH = 120;
 const TRUNCATE_STYLE = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
 
@@ -186,28 +187,24 @@ function mountSkills(plugin, host) {
         menu.showAtPosition({ x: bounds.left, y: bounds.bottom }, button.ownerDocument);
     }
 
-    function openViewSkillModal(skill) {
-        const text = readText(skill.skillMdPath) ?? "";
-        const modal = createModal({ title: "查看技能：" + skill.name, width: 820, widthVw: 94, maxHeight: 88 });
-        modal.body.style.cssText = "padding:16px 18px;overflow:auto;display:flex;flex-direction:column;gap:10px;";
-        modal.body.appendChild(el("div",
-            "font-family:var(--font-monospace);font-size:12px;color:var(--text-muted);word-break:break-all;",
-            skill.skillMdPath));
-        if (skill.source.kind === "github") {
-            modal.body.appendChild(el("div",
-                "font-size:12px;color:var(--text-muted);",
-                "上游：" + skill.source.url + (skill.source.commit ? " @ " + skill.source.commit : "")));
+    async function openViewSkillModal(skill) {
+        const component = new Component();
+        const dialog = plugin.openDialog("查看技能：" + skill.name, () => component.unload());
+        dialog.modalEl.style.width = "min(820px, 94vw)";
+        dialog.modalEl.style.maxHeight = "88vh";
+        dialog.contentEl.style.cssText = "min-height:0;overflow:auto;overflow-wrap:anywhere;";
+        const preview = el("div");
+        preview.className = "markdown-rendered";
+        dialog.contentEl.appendChild(preview);
+        component.load();
+        try {
+            const text = readText(skill.skillMdPath);
+            if (text === null) throw new Error("找不到 SKILL.md：" + skill.skillMdPath);
+            const { contentStart } = getFrontMatterInfo(text);
+            await MarkdownRenderer.render(plugin.app, text.slice(contentStart), preview, "", component);
+        } catch (error) {
+            preview.textContent = error.message || String(error);
         }
-        const pre = el("pre",
-            "margin:0;padding:12px;border:1px solid var(--background-modifier-border);border-radius:6px;" +
-            "background:var(--background-secondary);font-family:var(--font-monospace);font-size:var(--font-ui-medium,15px);" +
-            "line-height:1.6;white-space:pre-wrap;word-break:break-word;overflow:auto;flex:1;",
-            text);
-        modal.body.appendChild(pre);
-        const closeBtn = el("button", null, "关闭");
-        closeBtn.className = "mod-cta";
-        closeBtn.onclick = () => modal.close();
-        modal.footer.appendChild(closeBtn);
     }
 
     function openEditSkillModal(skill, creationScope) {
@@ -687,7 +684,7 @@ function mountSkills(plugin, host) {
         });
     }
 
-    function appendEmptyHarnessCells(row, count, tag) {
+    function appendEmptyCells(row, count, tag) {
         if (!count) return;
         const spacer = el(tag, SKILL_CELL_STYLE);
         spacer.colSpan = count;
@@ -700,8 +697,13 @@ function mountSkills(plugin, host) {
         const info = el("th", SKILL_CELL_STYLE + "text-align:left;font-weight:400;");
         info.setAttribute("scope", "row");
         const titleLine = el("div", "display:flex;align-items:baseline;gap:8px;line-height:1.5;");
-        const name = el("span", TRUNCATE_STYLE + "font-weight:600;font-size:var(--am-font-primary);", skill.name);
+        const name = el("button", TRUNCATE_STYLE +
+            "display:block;text-align:left;padding:0;height:auto;min-height:0;border:0;box-shadow:none;" +
+            "background:transparent;color:var(--text-accent);font:inherit;font-weight:600;" +
+            "font-size:var(--am-font-primary);cursor:pointer;", skill.name);
+        name.type = "button";
         name.title = skill.name;
+        name.onclick = () => openViewSkillModal(skill);
         titleLine.appendChild(name);
         info.appendChild(titleLine);
 
@@ -735,20 +737,31 @@ function mountSkills(plugin, host) {
         }
         row.appendChild(info);
 
+        const updateCell = el("td", SKILL_CELL_STYLE + "text-align:right;");
+        row.appendChild(updateCell);
+        const isGitHub = skill.source.kind === "github";
+        if (isGitHub) renderGitHubUpdate(updateCell, descriptionLine, skill);
+
         const typeCell = el("td", SKILL_CELL_STYLE);
         const typeSelect = skillTypeSelect("类型", skill.source.kind);
-        typeSelect.style.width = "100%";
+        typeSelect.style.maxWidth = "100%";
         typeSelect.title = skill.name;
         typeSelect.onchange = () => changeSkillType(typeSelect, skill);
         typeCell.appendChild(typeSelect);
         row.appendChild(typeCell);
 
-        const actionCell = el("td", SKILL_CELL_STYLE);
-        const actions = el("div", "display:flex;gap:4px;");
-        actionCell.appendChild(actions);
+        const actionCell = el("td", SKILL_CELL_STYLE + "text-align:center;");
+        const editBtn = el("button", SKILL_ACTION_STYLE +
+            "display:inline-flex;align-items:center;justify-content:center;width:28px;padding:0;--icon-size:14px;");
+        editBtn.type = "button";
+        editBtn.title = isGitHub ? "修改链接" : "编辑";
+        editBtn.setAttribute("aria-label", editBtn.title);
+        setIcon(editBtn, "pencil");
+        editBtn.onclick = () => isGitHub ? openGitHubLinkModal(skill) : openEditSkillModal(skill);
+        actionCell.appendChild(editBtn);
         row.appendChild(actionCell);
 
-        appendEmptyHarnessCells(row, emptyHarnessColumns, "td");
+        appendEmptyCells(row, emptyHarnessColumns, "td");
 
         if (scope.harnessStates.length) {
             for (const hState of scope.harnessStates) {
@@ -794,67 +807,56 @@ function mountSkills(plugin, host) {
             }
         }
 
-        const viewBtn = el("button", SKILL_ACTION_STYLE, "查看");
-        viewBtn.onclick = () => openViewSkillModal(skill);
-        actions.appendChild(viewBtn);
-
-        if (skill.source.kind === "self") {
-            const editBtn = el("button", SKILL_ACTION_STYLE, "编辑");
-            editBtn.onclick = () => openEditSkillModal(skill);
-            actions.appendChild(editBtn);
-        } else {
-            const updateBtn = el("button", SKILL_ACTION_STYLE, "更新");
-            const updateInfo = el("span", TRUNCATE_STYLE + "max-width:55%;flex-shrink:0;");
-            descriptionLine.appendChild(updateInfo);
-            let updating = false;
-            const updateStatus = () => {
-                const result = checks.status(skill.source);
-                const available = result?.status === "update-available";
-                updateBtn.className = available ? "mod-cta" : "";
-                updateBtn.disabled = updating || result?.status === "up-to-date";
-                updateInfo.textContent = updateInfo.title = formatCheckStatus(result);
-                updateInfo.hidden = !updateInfo.textContent;
-                updateInfo.style.color = available ? "var(--text-accent)" : "var(--text-muted)";
-            };
-            updateStatus();
-            updateRows.push(updateStatus);
-            updateBtn.onclick = async () => {
-                if (updateBtn.disabled) return;
-                updating = true;
-                updateBtn.disabled = true;
-                try {
-                    const res = await exclusive(() => updateGitHubSkill(history, stateRoot, skill, checks));
-                    if (res) new Notice("已更新 " + skill.name + "（" + res.latestCommit.slice(0, 7) + "）");
-                    await safeRefresh();
-                } catch (error) {
-                    await showMessage("更新失败", error.message || String(error));
-                } finally {
-                    updating = false;
-                    updateStatus();
-                }
-            };
-            actions.appendChild(updateBtn);
-            const sourceBtn = el("button", SKILL_ACTION_STYLE +
-                "display:inline-flex;align-items:center;justify-content:center;width:28px;padding:0;--icon-size:14px;");
-            sourceBtn.type = "button";
-            sourceBtn.title = "修改链接";
-            sourceBtn.setAttribute("aria-label", sourceBtn.title);
-            setIcon(sourceBtn, "pencil");
-            sourceBtn.onclick = () => openGitHubLinkModal(skill);
-            actions.appendChild(sourceBtn);
-        }
-
         parent.appendChild(row);
+    }
+
+    function renderGitHubUpdate(cell, descriptionLine, skill) {
+        const updateBtn = el("button", SKILL_ACTION_STYLE, "更新");
+        updateBtn.type = "button";
+        updateBtn.className = "mod-cta";
+        const updateInfo = el("span", TRUNCATE_STYLE + "max-width:55%;flex-shrink:0;");
+        descriptionLine.appendChild(updateInfo);
+
+        const updateStatus = () => {
+            const result = checks.status(skill.source);
+            const available = result?.status === "update-available";
+            if (available && !updateBtn.parentElement) cell.appendChild(updateBtn);
+            if (!available && updateBtn.parentElement) updateBtn.remove();
+            updateInfo.textContent = updateInfo.title = formatCheckStatus(result);
+            updateInfo.hidden = !updateInfo.textContent;
+            updateInfo.style.color = available ? "var(--text-accent)" : "var(--text-muted)";
+        };
+        updateBtn.onclick = async () => {
+            if (updateBtn.disabled || checks.status(skill.source)?.status !== "update-available") {
+                updateStatus();
+                return;
+            }
+            updateBtn.disabled = true;
+            try {
+                const res = await exclusive(() => updateGitHubSkill(history, stateRoot, skill, checks));
+                if (res) new Notice("已更新 " + skill.name + "（" + res.latestCommit.slice(0, 7) + "）");
+                await safeRefresh();
+            } catch (error) {
+                await showMessage("更新失败", error.message || String(error));
+            } finally {
+                updateBtn.disabled = false;
+                updateStatus();
+            }
+        };
+        updateStatus();
+        updateRows.push(updateStatus);
     }
 
     function renderSkillTable(parent, scope, harnessColumns) {
         const scroll = el("div", "overflow-x:auto;max-width:100%;");
         scroll.tabIndex = 0;
         scroll.setAttribute("aria-label", "技能");
-        const minWidth = SKILL_NAME_MIN_WIDTH + SKILL_TYPE_WIDTH + SKILL_ACTION_WIDTH + harnessColumns * SKILL_HARNESS_WIDTH;
+        const minWidth = SKILL_NAME_MIN_WIDTH + SKILL_UPDATE_WIDTH + SKILL_TYPE_WIDTH + SKILL_ACTION_WIDTH +
+            harnessColumns * SKILL_HARNESS_WIDTH;
         const table = el("table", "width:100%;border-collapse:collapse;table-layout:fixed;margin:0;min-width:" + minWidth + "px;");
         const colgroup = el("colgroup");
         colgroup.appendChild(el("col"));
+        colgroup.appendChild(el("col", "width:" + SKILL_UPDATE_WIDTH + "px;"));
         colgroup.appendChild(el("col", "width:" + SKILL_TYPE_WIDTH + "px;"));
         colgroup.appendChild(el("col", "width:" + SKILL_ACTION_WIDTH + "px;"));
         if (harnessColumns) {
@@ -873,8 +875,11 @@ function mountSkills(plugin, host) {
             columns.appendChild(header);
         };
         const emptyHarnessColumns = harnessColumns - scope.harnessStates.length;
-        for (const label of ["技能", "类型", "操作"]) appendHeader(label, "left");
-        appendEmptyHarnessCells(columns, emptyHarnessColumns, "th");
+        appendHeader("技能", "left");
+        appendEmptyCells(columns, 1, "th");
+        appendHeader("类型", "left");
+        appendHeader("操作", "center");
+        appendEmptyCells(columns, emptyHarnessColumns, "th");
         for (const tool of scope.harnessStates) appendHeader(tool.name, "right");
         head.appendChild(columns);
         table.appendChild(head);

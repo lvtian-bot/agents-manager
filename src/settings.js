@@ -1,7 +1,7 @@
 const { PluginSettingTab, Setting, Notice, FuzzySuggestModal } = require("obsidian");
 const path = require("path");
 const fs = require("fs");
-const { modelPresets, modelPreset } = require("./models");
+const { modelPresets, modelPreset, modelEndpoint, modelSecretId } = require("./models");
 
 const harnessTargets = {
     Codex: "~/.codex/AGENTS.md", Claude: "~/.claude/CLAUDE.md", ZCode: "~/.zcode/AGENTS.md",
@@ -25,6 +25,7 @@ const legacySources = {
 function loadSettings(app, data, pluginDir) {
     const saved = { ...data };
     delete saved.githubCredentialVariable;
+    delete saved.credentialVariable;
     const adapter = app.vault?.adapter;
     const root = adapter?.getBasePath?.() || adapter?.basePath;
     const config = root && path.join(root, app.vault.configDir || ".obsidian");
@@ -33,8 +34,8 @@ function loadSettings(app, data, pluginDir) {
         fs.existsSync(path.join(installed, "sync", "legacy-settings")));
     const hasRules = Object.keys(saved.templates || {}).length > 0;
     return {
-        endpoint: "", model: "", credentialVariable: "",
-        modelConnection: saved.endpoint || saved.model || saved.credentialVariable ? "custom" : "",
+        endpoint: "", model: "",
+        modelConnection: saved.endpoint || saved.model ? "custom" : "",
         typeProperty: hasRules ? "content_type" : "", templates: {}, defaultTemplate: "",
         singleTemplate: saved.defaultTemplate || "",
         summaryMode: hasRules ? "multiple" : "single",
@@ -70,22 +71,6 @@ function skillProjectPath(value) {
     if (!normalized) throw new Error("此项不能为空。");
     if (normalized === ".agents/skills") throw new Error("项目级分发目标不能是 .agents/skills 本身。");
     return normalized;
-}
-
-function envVariableName(value) {
-    if (!value) return "";
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) throw new Error("请填写有效的环境变量名。");
-    return value;
-}
-
-function modelEndpoint(value) {
-    let url;
-    try { url = new URL(value); } catch { throw new Error("请填写完整的模型接口地址。"); }
-    if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) {
-        throw new Error("模型接口须使用 HTTPS 或本机地址。");
-    }
-    if (url.username || url.password || url.search || url.hash) throw new Error("请单独配置请求凭据。");
-    return value;
 }
 
 class NotePicker extends FuzzySuggestModal {
@@ -302,46 +287,64 @@ class ManagerSettings extends PluginSettingTab {
         connection.createEl("option", { text: "自定义连接" }).value = "custom";
         connection.value = plugin.settings.modelConnection;
 
+        const custom = model.createDiv();
+        const endpointField = field(custom, "endpoint", "模型接口", "兼容 Chat Completions 的完整请求地址。", modelEndpoint);
+        const modelField = field(custom, "model", "模型名称", "", required);
+        function readCustomConnection(requireComplete = false) {
+            if (!requireComplete && !endpointField.input.value.trim() && !modelField.input.value.trim()) {
+                clearError(endpointField.input);
+                clearError(modelField.input);
+                return { endpoint: "", model: "" };
+            }
+            return { endpoint: endpointField.getValue(), model: modelField.getValue() };
+        }
+
         const keyRow = model.createDiv();
         const keySetting = new Setting(keyRow).setName("API Key");
         const keyInput = textInput(keySetting.controlEl, "API Key", "", "password");
         keyInput.setAttribute("autocomplete", "off");
-        function showConnection() {
-            const preset = modelPreset(connection.value);
-            custom.hidden = connection.value !== "custom";
-            keyRow.hidden = !preset;
+        function selectedSecretId() {
+            return modelSecretId(connection.value, endpointField.input.value.trim());
+        }
+        function refreshKeyInput() {
+            const id = selectedSecretId();
             keyInput.value = "";
-            keyInput.placeholder = preset && plugin.app.secretStorage.getSecret(preset.secretId) ? "••••••••" : "API Key";
+            keyInput.placeholder = id && plugin.app.secretStorage.getSecret(id) ? "••••••••" : "API Key";
             clearError(keyInput);
         }
-        keySetting.addButton(button => button.setButtonText("保存").onClick(() => {
-            const preset = modelPreset(connection.value);
-            if (!preset) return;
-            let key;
-            try { key = read(keyInput, keyRow, required); } catch { return; }
+        function showConnection() {
+            custom.hidden = connection.value !== "custom";
+            keyRow.hidden = custom.hidden && !modelPreset(connection.value);
+            refreshKeyInput();
+        }
+        keySetting.addButton(button => button.setButtonText("保存").onClick(async () => {
+            const selection = connection.value;
+            const draftKey = keyInput.value;
+            let key, config;
             try {
-                plugin.app.secretStorage.setSecret(preset.secretId, key);
-                showConnection();
+                if (selection === "custom") config = readCustomConnection(true);
+                key = read(keyInput, keyRow, required);
+            } catch { return; }
+            const id = modelSecretId(selection, config?.endpoint);
+            if (!id) return;
+            button.setDisabled(true);
+            try {
+                if (config && !await saveFields(() => config)) return;
+                plugin.app.secretStorage.setSecret(id, key);
+                if (selectedSecretId() === id && keyInput.value === draftKey) refreshKeyInput();
                 new Notice("设置已保存。");
             } catch {
                 new Notice("设置保存失败。");
+            } finally {
+                button.setDisabled(false);
             }
         }));
 
-        const custom = model.createDiv();
-        function validateConnectionField(validate) {
-            return value => Object.values(connectionFields).some(({ input }) => input.value.trim()) ? validate(value) : "";
-        }
-        const connectionFields = {
-            endpoint: field(custom, "endpoint", "模型接口", "兼容 Chat Completions 的完整请求地址。", validateConnectionField(modelEndpoint)),
-            model: field(custom, "model", "模型名称", "", validateConnectionField(required)),
-            credentialVariable: field(custom, "credentialVariable", "凭据环境变量名", "只填写变量名。", validateConnectionField(value => envVariableName(required(value)))),
+        endpointField.input.onchange = () => {
+            refreshKeyInput();
+            return saveFields(() => readCustomConnection());
         };
-        for (const { input } of Object.values(connectionFields)) {
-            input.onchange = () => saveFields(() => Object.fromEntries(
-                Object.entries(connectionFields).map(([key, { getValue }]) => [key, getValue()]),
-            ));
-        }
+        modelField.input.onchange = () => saveFields(() => readCustomConnection());
         connection.onchange = async () => {
             const modelConnection = connection.value;
             showConnection();
