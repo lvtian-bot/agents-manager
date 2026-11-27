@@ -17,6 +17,33 @@ const NAV_ACTIVE_STYLE =
     "background:var(--background-secondary);border:1px solid var(--background-modifier-border);" +
     "color:var(--text-normal);font-weight:600;";
 
+function avoidStatusBar(root, workspace) {
+    const doc = root.ownerDocument;
+    const statusBar = doc?.querySelector(".status-bar");
+    const ResizeObserver = doc?.defaultView?.ResizeObserver;
+    if (!statusBar || !ResizeObserver) return;
+
+    const updateClearance = () => {
+        const view = root.getBoundingClientRect();
+        const bar = statusBar.getBoundingClientRect();
+        const overlaps = bar.width > 0 && bar.height > 0 &&
+            view.left < bar.right && view.right > bar.left &&
+            view.top < bar.bottom && view.bottom > bar.top;
+        const padding = (overlaps ? Math.ceil(view.bottom - bar.top) : 0) + "px";
+        if (root.style.paddingBottom !== padding) root.style.paddingBottom = padding;
+    };
+
+    const observer = new ResizeObserver(updateClearance);
+    observer.observe(root, { box: "border-box" });
+    observer.observe(statusBar, { box: "border-box" });
+    const layoutEvent = workspace.on("layout-change", updateClearance);
+    updateClearance();
+    return () => {
+        observer.disconnect();
+        workspace.offref(layoutEvent);
+    };
+}
+
 class ManagerWorkspaceView extends ItemView {
     constructor(leaf, plugin) {
         super(leaf);
@@ -45,7 +72,7 @@ class ManagerWorkspaceView extends ItemView {
     async onOpen() {
         const root = this.contentEl;
         root.empty?.();
-        root.style.cssText = "display:flex;flex-direction:column;height:100%;overflow:hidden;padding:0;";
+        root.style.cssText = "display:flex;flex-direction:column;height:100%;box-sizing:border-box;overflow:hidden;padding:0;";
 
         const nav = document.createElement("div");
         nav.setAttribute("role", "tablist");
@@ -75,6 +102,7 @@ class ManagerWorkspaceView extends ItemView {
 
         root.appendChild(nav);
         root.appendChild(stage);
+        this.stopAvoidingStatusBar = avoidStatusBar(root, this.plugin.app.workspace);
         this.opened = true;
         this.justOpened = true;
         await this.setSection(this.activeSection, { initial: true });
@@ -126,6 +154,7 @@ class ManagerWorkspaceView extends ItemView {
 
     async onClose() {
         this.opened = false;
+        this.stopAvoidingStatusBar?.();
         for (const controller of Object.values(this.controllers)) {
             controller?.destroy?.();
         }
