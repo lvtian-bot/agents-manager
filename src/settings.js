@@ -1,6 +1,7 @@
 const { PluginSettingTab, Setting, Notice, FuzzySuggestModal } = require("obsidian");
 const path = require("path");
 const fs = require("fs");
+const { modelPresets, modelPreset } = require("./models");
 
 const harnessTargets = {
     Codex: "~/.codex/AGENTS.md", Claude: "~/.claude/CLAUDE.md", ZCode: "~/.zcode/AGENTS.md",
@@ -33,6 +34,7 @@ function loadSettings(app, data, pluginDir) {
     const hasRules = Object.keys(saved.templates || {}).length > 0;
     return {
         endpoint: "", model: "", credentialVariable: "",
+        modelConnection: saved.endpoint || saved.model || saved.credentialVariable ? "custom" : "",
         typeProperty: hasRules ? "content_type" : "", templates: {}, defaultTemplate: "",
         singleTemplate: saved.defaultTemplate || "",
         summaryMode: hasRules ? "multiple" : "single",
@@ -106,8 +108,8 @@ function settingsSection(parent, title) {
     return section;
 }
 
-function textInput(parent, label, value) {
-    const input = parent.createEl("input", { type: "text", attr: { "aria-label": label } });
+function textInput(parent, label, value, type = "text") {
+    const input = parent.createEl("input", { attr: { type, "aria-label": label } });
     input.defaultValue = value;
     input.placeholder = label;
     input.style.cssText = "flex:1 1 10em;min-width:0;max-width:100%";
@@ -117,7 +119,10 @@ function textInput(parent, label, value) {
 function noteButton(parent, plugin, input) {
     const button = parent.createEl("button", { text: "选择笔记", attr: { type: "button", "aria-label": `选择${input.getAttribute("aria-label")}` } });
     button.onclick = () => {
-        const picker = new NotePicker(plugin, path => { input.value = path; });
+        const picker = new NotePicker(plugin, path => {
+            input.value = path;
+            input.onchange();
+        });
         plugin.modals.add(picker);
         picker.open();
     };
@@ -137,41 +142,68 @@ class ManagerSettings extends PluginSettingTab {
         const container = this.containerEl;
         container.empty();
         const plugin = this.owner;
-        const readers = new Map();
-        let invalidInput;
-        let errorEl;
-        function clearError() {
-            invalidInput?.removeAttribute("aria-invalid");
-            errorEl?.remove();
-            errorEl = invalidInput = null;
+        const errors = new Map();
+        function clearError(input) {
+            input.removeAttribute("aria-invalid");
+            errors.get(input)?.remove();
+            errors.delete(input);
+        }
+        function showError(input, row, message) {
+            clearError(input);
+            const error = row.createDiv({ text: message, attr: { role: "alert" } });
+            error.style.color = "var(--text-error)";
+            errors.set(input, error);
+            input.setAttribute("aria-invalid", "true");
         }
         function read(input, row, parse) {
+            clearError(input);
             try {
                 const value = input.value === input.defaultValue ? input.value : input.value.trim();
-                return parse ? parse(value) : value;
+                return parse(value);
             } catch (error) {
-                clearError();
-                errorEl = row.createDiv({ text: error.message, attr: { role: "alert" } });
-                errorEl.style.color = "var(--text-error)";
-                invalidInput = input;
-                input.setAttribute("aria-invalid", "true");
-                input.focus();
+                showError(input, row, error.message);
                 throw error;
             }
+        }
+        async function save(change) {
+            try {
+                await plugin.updateSettings(change);
+                return true;
+            } catch {
+                new Notice("设置保存失败。");
+                return false;
+            }
+        }
+        function saveFields(readFields) {
+            let patch;
+            try { patch = readFields(); } catch { return; }
+            return save(current => {
+                if (Object.entries(patch).every(([key, value]) => current[key] === value)) return;
+                return { ...current, ...patch };
+            });
         }
         function field(parent, key, label, desc, parse) {
             const row = parent.createDiv();
             const item = new Setting(row).setName(label).setDesc(desc);
             const input = textInput(item.controlEl, label, plugin.settings[key]);
             if (parse === vaultPath) noteButton(item.controlEl, plugin, input);
-            readers.set(key, () => read(input, row, parse));
-            return input;
+            const getValue = () => read(input, row, parse);
+            input.onchange = () => saveFields(() => ({ [key]: getValue() }));
+            return { input, getValue };
         }
         function mapping(parent, key, title, nameLabel, pathLabel, addLabel, parse) {
             const action = new Setting(parent).setName(title);
             const list = parent.createDiv();
-            const rows = new Map();
             function add(name, value) {
+                let savedName = name;
+                let pending = Promise.resolve();
+                function saveRow(change, onSaved) {
+                    pending = pending.then(async () => {
+                        const saved = await save(change);
+                        onSaved(saved);
+                    });
+                    return pending;
+                }
                 const row = list.createDiv();
                 const controls = row.createDiv();
                 controls.style.cssText = "display:flex;flex-wrap:wrap;gap:0.5em;margin-block:0.5em";
@@ -185,28 +217,54 @@ class ManagerSettings extends PluginSettingTab {
                 const nameInput = column(nameLabel, name, 1);
                 const pathInput = column(pathLabel, value, 2);
                 if (parse === vaultPath) noteButton(controls, plugin, pathInput);
+                nameInput.onchange = pathInput.onchange = () => {
+                    if (remove.disabled) return;
+                    clearError(nameInput);
+                    clearError(pathInput);
+                    if (!savedName && (!nameInput.value.trim() || !pathInput.value.trim())) return;
+                    let nextName, nextPath;
+                    try {
+                        nextName = read(nameInput, row, required);
+                        nextPath = read(pathInput, row, value => parse(required(value)));
+                    } catch { return; }
+                    let duplicate = false;
+                    return saveRow(current => {
+                        if (nextName !== savedName && Object.hasOwn(current[key], nextName)) {
+                            duplicate = true;
+                            showError(nameInput, row, nameLabel + "不能重复。");
+                            return;
+                        }
+                        if (nextName === savedName && current[key][savedName] === nextPath) return;
+                        const entries = new Map(Object.entries(current[key]));
+                        if (savedName) entries.delete(savedName);
+                        entries.set(nextName, nextPath);
+                        return { ...current, [key]: Object.fromEntries(entries) };
+                    }, saved => {
+                        if (saved && !duplicate) savedName = nextName;
+                    });
+                };
                 const remove = controls.createEl("button", { text: "移除" });
                 remove.onclick = () => {
-                    rows.delete(row);
-                    row.remove();
+                    remove.disabled = nameInput.disabled = pathInput.disabled = true;
+                    return saveRow(current => {
+                        if (!savedName) return;
+                        const remaining = { ...current[key] };
+                        delete remaining[savedName];
+                        return { ...current, [key]: remaining };
+                    }, saved => {
+                        if (saved) {
+                            clearError(nameInput);
+                            clearError(pathInput);
+                            row.remove();
+                        } else {
+                            remove.disabled = nameInput.disabled = pathInput.disabled = false;
+                        }
+                    });
                 };
-                rows.set(row, { nameInput, pathInput });
                 return nameInput;
             }
             for (const [name, value] of Object.entries(plugin.settings[key])) add(name, value);
             action.addButton(button => button.setButtonText(addLabel).onClick(() => add("", "").focus()));
-            readers.set(key, () => {
-                const entries = new Map();
-                for (const [row, { nameInput, pathInput }] of rows) {
-                    const keyName = read(nameInput, row, value => {
-                        required(value);
-                        if (entries.has(value)) throw new Error(`${nameLabel}不能重复。`);
-                        return value;
-                    });
-                    entries.set(keyName, read(pathInput, row, value => parse(required(value))));
-                }
-                return Object.fromEntries(entries);
-            });
         }
 
         const summary = settingsSection(container, "AI 总结笔记");
@@ -215,7 +273,6 @@ class ManagerSettings extends PluginSettingTab {
         mode.createEl("option", { text: "单提示词模式" }).value = "single";
         mode.createEl("option", { text: "多提示词模式" }).value = "multiple";
         mode.value = plugin.settings.summaryMode;
-        readers.set("summaryMode", () => mode.value);
         const single = summary.createDiv();
         const multiple = summary.createDiv();
         field(single, "singleTemplate", "总结提示词", "留空使用内置提示词。模板可以用 {activeNote} 引用笔记。", vaultPath);
@@ -225,37 +282,75 @@ class ManagerSettings extends PluginSettingTab {
         function showMode() {
             single.hidden = mode.value !== "single";
             multiple.hidden = !single.hidden;
-            clearError();
         }
-        mode.onchange = showMode;
+        mode.onchange = async () => {
+            const summaryMode = mode.value;
+            showMode();
+            if (!await saveFields(() => ({ summaryMode })) && mode.value === summaryMode) {
+                mode.value = plugin.settings.summaryMode;
+                showMode();
+            }
+        };
         showMode();
-        const model = settingsSection(container, "模型连接");
-        function validateConnectionField(validate) {
-            return value => connectionInputs.some(input => input.value.trim()) ? validate(value) : "";
+        const model = settingsSection(container, "模型设置");
+        const modelSetting = new Setting(model).setName("模型");
+        const connection = modelSetting.controlEl.createEl("select", { attr: { "aria-label": "模型" } });
+        connection.createEl("option", { text: "请选择模型" }).value = "";
+        for (const [id, preset] of Object.entries(modelPresets)) {
+            connection.createEl("option", { text: preset.label }).value = id;
         }
-        const connectionInputs = [
-            field(model, "endpoint", "模型接口", "兼容 Chat Completions 的完整请求地址。", validateConnectionField(modelEndpoint)),
-            field(model, "model", "模型名称", "", validateConnectionField(required)),
-            field(model, "credentialVariable", "凭据环境变量名", "只填写变量名。", validateConnectionField(value => envVariableName(required(value)))),
-        ];
-        new Setting(container).addButton(button => button.setButtonText("保存设置").setCta().onClick(async () => {
-            clearError();
-            button.setDisabled(true);
+        connection.createEl("option", { text: "自定义连接" }).value = "custom";
+        connection.value = plugin.settings.modelConnection;
+
+        const keyRow = model.createDiv();
+        const keySetting = new Setting(keyRow).setName("API Key");
+        const keyInput = textInput(keySetting.controlEl, "API Key", "", "password");
+        keyInput.setAttribute("autocomplete", "off");
+        function showConnection() {
+            const preset = modelPreset(connection.value);
+            custom.hidden = connection.value !== "custom";
+            keyRow.hidden = !preset;
+            keyInput.value = "";
+            keyInput.placeholder = preset && plugin.app.secretStorage.getSecret(preset.secretId) ? "••••••••" : "API Key";
+            clearError(keyInput);
+        }
+        keySetting.addButton(button => button.setButtonText("保存").onClick(() => {
+            const preset = modelPreset(connection.value);
+            if (!preset) return;
+            let key;
+            try { key = read(keyInput, keyRow, required); } catch { return; }
             try {
-                const patch = {};
-                for (const [key, getValue] of readers) {
-                    if (single.hidden && key === "singleTemplate") continue;
-                    if (multiple.hidden && ["typeProperty", "templates", "defaultTemplate"].includes(key)) continue;
-                    patch[key] = getValue();
-                }
-                await plugin.updateSettings(current => ({ ...current, ...patch }));
+                plugin.app.secretStorage.setSecret(preset.secretId, key);
+                showConnection();
                 new Notice("设置已保存。");
-            } catch (error) {
-                if (!invalidInput) new Notice("设置保存失败。");
-            } finally {
-                button.setDisabled(false);
+            } catch {
+                new Notice("设置保存失败。");
             }
         }));
+
+        const custom = model.createDiv();
+        function validateConnectionField(validate) {
+            return value => Object.values(connectionFields).some(({ input }) => input.value.trim()) ? validate(value) : "";
+        }
+        const connectionFields = {
+            endpoint: field(custom, "endpoint", "模型接口", "兼容 Chat Completions 的完整请求地址。", validateConnectionField(modelEndpoint)),
+            model: field(custom, "model", "模型名称", "", validateConnectionField(required)),
+            credentialVariable: field(custom, "credentialVariable", "凭据环境变量名", "只填写变量名。", validateConnectionField(value => envVariableName(required(value)))),
+        };
+        for (const { input } of Object.values(connectionFields)) {
+            input.onchange = () => saveFields(() => Object.fromEntries(
+                Object.entries(connectionFields).map(([key, { getValue }]) => [key, getValue()]),
+            ));
+        }
+        connection.onchange = async () => {
+            const modelConnection = connection.value;
+            showConnection();
+            if (!await saveFields(() => ({ modelConnection })) && connection.value === modelConnection) {
+                connection.value = plugin.settings.modelConnection;
+                showConnection();
+            }
+        };
+        showConnection();
     }
 }
 module.exports = {
