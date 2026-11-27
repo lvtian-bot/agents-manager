@@ -161,6 +161,7 @@ async function loadPlugin(app, options = {}) {
             return leaf;
         },
         revealLeaf(leaf) { this.revealedLeaf = leaf; },
+        setActiveLeaf(leaf) { this.activeLeaf = leaf; },
     };
 
     const module = { exports: {} };
@@ -1238,15 +1239,18 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     const [leaf] = workspace.getLeavesOfType("agents-manager-workspace");
     assert.ok(leaf);
     assert.equal(workspace.revealedLeaf, leaf);
+    assert.equal(workspace.activeLeaf, leaf);
     assert.equal(ribbon.title, leaf.view.getDisplayText());
     assert.equal(ribbon.icon, leaf.view.getIcon());
     assert.equal(button("指令同步").getAttribute("aria-selected"), "true");
 
     await plugin.invoke("manage-skills");
     assert.equal(button("技能管理").getAttribute("aria-selected"), "true");
+    workspace.setActiveLeaf(workspace.getLeaf("tab"));
     await ribbon.callback();
     assert.deepEqual(workspace.getLeavesOfType("agents-manager-workspace"), [leaf]);
     assert.equal(workspace.revealedLeaf, leaf);
+    assert.equal(workspace.activeLeaf, leaf);
     assert.equal(button("技能管理").getAttribute("aria-selected"), "true");
 
     await plugin.invoke("sync-instructions");

@@ -47,6 +47,7 @@ module.exports = class AgentsManager extends Plugin {
             }
         }
         await this.app.workspace.revealLeaf(leaf);
+        this.app.workspace.setActiveLeaf(leaf, { focus: true });
         return leaf;
     }
 
