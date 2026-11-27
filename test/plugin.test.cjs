@@ -220,7 +220,7 @@ async function loadPlugin(app, options = {}) {
             }
             return require(name);
         },
-        process: { platform: process.platform, env: { TEST_MODEL_API_KEY: "test-key", TEST_GH_TOKEN: "ghp-test-token", ...(options.env || {}) } },
+        process: { platform: process.platform, env: { TEST_MODEL_API_KEY: "test-key", ...(options.env || {}) } },
         console: { log() {}, error: (error) => assert.fail(String(error)) },
         fetch: options.fetch,
         Buffer, TextDecoder, URL, URLSearchParams, AbortController,
@@ -296,12 +296,13 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
         assert.equal(fields("模型接口")[0].value, "https://legacy.example.org/v1/chat/completions");
         assert.equal(fields("模型名称")[0].value, "saved-model");
         assert.equal(fields("凭据环境变量名")[0].value, "SAVED_API_KEY");
-        assert.ok(nodes(element => element.tag === "details").every(element => !element.open));
+        assert.equal(nodes(element => element.tag === "details").length, 0);
         fields("选择未匹配时使用的提示词")[0].onclick();
         assert.equal(fields("未匹配时使用的提示词")[0].value, "模板/摘要.md");
         fields("模型接口")[0].value = "无效地址";
         await save();
-        assert.ok(fields("模型接口")[0].closest("details").open);
+        assert.equal(fields("模型接口")[0].getAttribute("aria-invalid"), "true");
+        assert.ok(fields("模型接口")[0].focused);
         assert.equal(saved.length, 0);
         assert.equal(plugin.settings.defaultTemplate, "");
         fields("模型接口")[0].value = "https://example.org/v1/chat/completions";
@@ -1062,18 +1063,21 @@ test("用户级、Work 和 Code 只显示可用操作，差异按钮顺序和推
     await plugin.closeWorkspace();
 });
 
-test("设置页仅保留 GitHub 凭据变量校验和保存，且不覆写技能分发目标", async () => {
+test("设置页直接展示两组设置，保存时清理旧 GitHub 凭据字段并保留技能分发目标", async () => {
     const saved = [];
     const notices = [];
     const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-skill-settings-"));
     try {
         const app = { vault: { adapter: { getBasePath: () => fixtureDir }, getMarkdownFiles: () => [] } };
-        const { plugin } = await loadPlugin(app, { notices, save: value => saved.push(value) });
+        const { plugin } = await loadPlugin(app, {
+            notices, save: value => saved.push(value),
+            settings: { githubCredentialVariable: "TEST_GH_TOKEN" },
+        });
         assert.deepEqual({ ...plugin.settings.skillUserTargets }, {
             Claude: "~/.claude/skills",
         });
         assert.deepEqual({ ...plugin.settings.skillProjectTargets }, { Claude: ".claude/skills" });
-        assert.equal(plugin.settings.githubCredentialVariable, "");
+        assert.equal(Object.hasOwn(plugin.settings, "githubCredentialVariable"), false);
 
         const tab = plugin.settingTab;
         const root = tab.containerEl = new Element("div");
@@ -1082,15 +1086,11 @@ test("设置页仅保留 GitHub 凭据变量校验和保存，且不覆写技能
         const button = (text, index = 0) => nodes(el => el.tag === "button" && el.textContent === text)[index];
         const fields = label => nodes(el => el.getAttribute("aria-label") === label);
 
+        assert.deepEqual(nodes(el => el.tag === "h3").map(el => el.textContent), ["AI 总结笔记", "模型连接"]);
+        assert.equal(nodes(el => el.tag === "details").length, 0);
         assert.equal(fields("技能目录").length, 0);
         assert.equal(fields("相对技能目录").length, 0);
-
-        fields("GitHub 凭据环境变量名")[0].value = "invalid-var";
-        await button("保存设置").onclick();
-        assert.equal(saved.length, 0);
-        assert.ok(fields("GitHub 凭据环境变量名")[0].closest("details").open);
-
-        fields("GitHub 凭据环境变量名")[0].value = "TEST_GH_TOKEN";
+        assert.equal(fields("GitHub 凭据环境变量名").length, 0);
         await button("保存设置").onclick();
 
         assert.equal(saved.length, 1);
@@ -1098,7 +1098,7 @@ test("设置页仅保留 GitHub 凭据变量校验和保存，且不覆写技能
             Claude: "~/.claude/skills",
         });
         assert.deepEqual({ ...saved[0].skillProjectTargets }, { Claude: ".claude/skills" });
-        assert.equal(saved[0].githubCredentialVariable, "TEST_GH_TOKEN");
+        assert.equal(Object.hasOwn(saved[0], "githubCredentialVariable"), false);
         assert.deepEqual(notices, ["设置已保存。"]);
     } finally {
         fs.rmSync(fixtureDir, { recursive: true, force: true });
@@ -1469,7 +1469,6 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     fs.rmSync(danglingTarget, { recursive: true, force: true });
 
     const binaryBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
-    const fetchCalls = [];
     const notices = [];
 
     const plugin = await loadPlugin({
@@ -1487,14 +1486,12 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
                 Claude: "~/.claude/skills",
                 CustomTool: "~/.custom-tool/skills",
             },
-            githubCredentialVariable: "TEST_GH_TOKEN",
         },
         async fetch(url, req) {
-            fetchCalls.push({ url, auth: req?.headers?.Authorization });
+            assert.equal(req.headers.Authorization, undefined);
             if (url.includes("/commits?")) {
                 assert.equal(url.includes("sha="), false);
                 assert.equal(url.includes("path=.agents%2Fskills%2Fgog"), true);
-                assert.equal(req.headers.Authorization, "Bearer ghp-test-token");
                 return {
                     ok: true,
                     json: async () => [{
@@ -1517,13 +1514,14 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
                     }),
                 };
             }
-            if (url.endsWith("/git/blobs/blob-md")) {
+            const rawRoot = "https://raw.githubusercontent.com/openclaw/gogcli/2222222222222222222222222222222222222222/.agents/skills/gog";
+            if (url === rawRoot + "/SKILL.md") {
                 return {
                     ok: true,
                     arrayBuffer: async () => Buffer.from("---\nname: gog\ndescription: 新版 Google CLI。\n---\n新版本\n"),
                 };
             }
-            if (url.endsWith("/git/blobs/blob-bin")) {
+            if (url === rawRoot + "/assets/icon.bin") {
                 return { ok: true, arrayBuffer: async () => binaryBytes };
             }
             assert.fail("未预期的请求：" + url);
@@ -1791,10 +1789,10 @@ test("技能更新先显示列表，打开时按来源复用一天的结果，�
     assert.deepEqual(colors(), [true, false, false]);
     const manual = buttons("检查更新")[0].onclick();
     assert.equal(requests, 2);
-    finishRequest({ ok: false, status: 503, text: async () => "" });
+    finishRequest({ ok: false, status: 429, text: async () => "" });
     await manual;
     assert.deepEqual(colors(), [false, false, false]);
-    assert.ok(findElements(plugin.body, node => node.textContent?.startsWith("检查失败")).length);
+    assert.ok(findElements(plugin.body, node => node.textContent === "检查失败：GitHub 请求过于频繁，请稍后再试。").length);
 
     await plugin.invoke("manage-skills");
     assert.equal(requests, 3);

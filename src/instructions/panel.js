@@ -819,26 +819,26 @@ function mountInstructions(plugin, host) {
                 "border-bottom:1px solid var(--background-modifier-border);" +
                 "display:flex;justify-content:space-between;align-items:center;gap:12px;";
             modal.header.appendChild(el("div",
-                "font-family:var(--font-monospace);font-size:11px;color:var(--text-muted);" +
+                "font-family:var(--font-monospace);font-size:var(--font-ui-smaller,12px);color:var(--text-muted);" +
                 "font-weight:400;word-break:break-all;max-width:60%;", config.pathText));
 
             var body = modal.body;
             body.style.cssText = "padding:0 18px;overflow:auto;flex:1;";
 
             var help = el("div",
-                "padding:12px 0;line-height:1.6;color:var(--text-muted);font-size:12px;", config.helpText);
+                "padding:12px 0;line-height:1.6;color:var(--text-muted);font-size:var(--font-ui-smaller,12px);", config.helpText);
 
             var listContainer = el("div",
                 "border:1px solid var(--background-modifier-border);border-radius:6px;" +
-                "font-family:var(--font-monospace);font-size:12px;line-height:1.7;");
+                "font-family:var(--font-monospace);font-size:var(--font-ui-medium,15px);line-height:1.6;");
 
-            var previewLabel = el("div", "margin:14px 0 6px;font-size:12px;font-weight:600;",
+            var previewLabel = el("div", "margin:14px 0 6px;font-size:var(--font-ui-small,13px);font-weight:600;",
                 config.previewLabel || "合并后源侧内容（实时刷新）：");
 
             var preview = el("pre",
                 "margin:0;padding:10px;border:1px solid var(--background-modifier-border);" +
                 "border-radius:6px;background:var(--background-secondary);" +
-                "font-family:var(--font-monospace);font-size:12px;line-height:1.6;" +
+                "font-family:var(--font-monospace);font-size:var(--font-ui-medium,15px);line-height:1.6;" +
                 "white-space:pre-wrap;word-break:break-all;max-height:220px;overflow:auto;");
 
             function refreshPreview() {
@@ -1155,9 +1155,9 @@ function mountInstructions(plugin, host) {
         var row = el("div", "display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;");
         var input = el("input",
             "flex:1 1 16em;min-width:0;padding:6px 10px;border:1px solid var(--background-modifier-border);" +
-            "border-radius:6px;font-size:13px;");
+            "border-radius:6px;font-size:var(--am-font-control);");
         input.placeholder = "粘贴项目文件夹或 AGENTS.md 路径";
-        var button = el("button", null, "登记为 " + typeName + " 项目");
+        var button = el("button", "font-size:var(--am-font-control);", "登记为 " + typeName + " 项目");
         var error = el("div", "color:var(--text-error);font-size:12px;line-height:1.5;");
 
         var run = function () {
@@ -1192,17 +1192,17 @@ function mountInstructions(plugin, host) {
         const group = el("div", "margin:6px 0 8px;padding:6px 8px;border-radius:6px;background:var(--background-secondary);");
         const row = el("div", "display:flex;flex-wrap:wrap;align-items:center;gap:6px;");
         const field = el("label", "display:flex;align-items:center;gap:8px;flex:1 1 16em;min-width:0;");
-        const name = el("span", "flex-shrink:0;font-weight:600;font-size:13px;", label);
-        const input = el("input", "flex:1;min-width:0;font-size:13px;");
+        const name = el("span", "flex-shrink:0;font-weight:600;", label);
+        const input = el("input", "flex:1;min-width:0;font-size:var(--am-font-control);");
         input.type = "text";
         input.setAttribute("aria-label", label);
         input.placeholder = "请选择来源笔记。";
         input.defaultValue = plugin.settings[key] || "";
         if (sourceDrafts.has(key)) input.value = sourceDrafts.get(key);
-        const choose = el("button", null, "选择笔记");
+        const choose = el("button", "font-size:var(--am-font-control);", "选择笔记");
         choose.type = "button";
         choose.setAttribute("aria-label", "选择" + label);
-        const save = el("button", null, "保存");
+        const save = el("button", "font-size:var(--am-font-control);", "保存");
         save.type = "button";
         const error = el("div", "color:var(--text-error);font-size:12px;");
         error.setAttribute("role", "alert");
@@ -1268,7 +1268,8 @@ function mountInstructions(plugin, host) {
             "padding:6px 10px;margin-bottom:5px;" +
             (card.removeEntry ? "padding-right:34px;" : ""));
         var status = el("div",
-            "flex:0 1 auto;max-width:min(100%,17em);color:var(--text-muted);font-size:12px;" +
+            "flex:0 1 auto;max-width:min(100%,17em);color:var(--text-muted);" +
+            (card.statusText ? "font-size:var(--am-font-control);" : "font-size:var(--am-font-secondary);") +
             "line-height:1.4;white-space:pre-wrap;overflow-wrap:anywhere;", card.statusText || card.reason);
         if (card.statusText) status.title = card.reason;
         var buttonRow = el("div",
@@ -1277,7 +1278,7 @@ function mountInstructions(plugin, host) {
         var titleBlock = el("div", "flex:1 1 9em;min-width:0;line-height:1.4;");
         titleBlock.appendChild(el("div", "font-weight:600;overflow-wrap:anywhere;", card.title));
         var pathText = el("div",
-            "font-family:var(--font-monospace);font-size:12px;color:var(--text-muted);" +
+            "font-family:var(--font-monospace);font-size:var(--am-font-secondary);color:var(--text-muted);" +
             "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;", card.pathText);
         if (card.pathText) {
             pathText.title = card.pathText;
@@ -1323,7 +1324,7 @@ function mountInstructions(plugin, host) {
         var runButtons = [];
         (card.buttons || []).forEach(function (entry) {
             var button = el("button",
-                "font-size:12px;padding:3px 7px;min-height:26px;height:auto;max-width:100%;white-space:normal;",
+                "font-size:var(--am-font-control);padding:3px 7px;min-height:28px;height:auto;max-width:100%;white-space:normal;",
                 entry.label);
             if (entry.label.includes("\n")) {
                 button.style.whiteSpace = "pre";
@@ -1447,14 +1448,14 @@ function mountInstructions(plugin, host) {
     host.appendChild(footer);
 
     content.appendChild(el("div",
-        "margin-bottom:14px;line-height:1.6;color:var(--text-muted);",
+        "margin-bottom:14px;line-height:1.5;color:var(--text-muted);font-size:var(--am-font-secondary);",
         "用户级指令同步整篇正文。Work 和 Code 项目只同步第一个一级标题及其内容，到第二个一级标题前为止。"));
 
     var TAB_BASE_STYLE =
-        "flex:1;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;box-shadow:none;" +
+        "flex:1 1 auto;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:var(--am-font-control);box-shadow:none;" +
         "background:transparent;border:1px solid transparent;color:var(--text-muted);";
     var TAB_ACTIVE_STYLE =
-        "flex:1;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;box-shadow:none;" +
+        "flex:1 1 auto;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:var(--am-font-control);box-shadow:none;" +
         "background:var(--background-secondary);border:1px solid var(--background-modifier-border);" +
         "color:var(--text-normal);font-weight:600;";
 
@@ -1522,7 +1523,7 @@ function mountInstructions(plugin, host) {
             });
         });
 
-        var tabBar = el("div", "display:flex;gap:8px;margin-bottom:12px;");
+        var tabBar = el("div", "display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;");
         var tabs = {};
         var panes = {};
 
@@ -1589,7 +1590,7 @@ function mountInstructions(plugin, host) {
         var availableHarnesses = Object.keys(harnessTargets).filter(function (name) {
             return !Object.prototype.hasOwnProperty.call(currentTargets, name);
         });
-        var addTargetButton = el("button", "flex-shrink:0;", "添加目标");
+        var addTargetButton = el("button", "flex-shrink:0;font-size:var(--am-font-control);", "添加目标");
         addTargetButton.type = "button";
         addTargetButton.disabled = availableHarnesses.length === 0;
         addTargetButton.onclick = function () {
@@ -1669,10 +1670,10 @@ function mountInstructions(plugin, host) {
         content.scrollTop = prevScroll;
     }
 
-    const refreshButton = el("button", null, "刷新");
-    const undo = el("button", null, "撤销上次操作");
-    const bulk = el("button");
-    const last = el("span", "margin-right:auto;align-self:center;");
+    const refreshButton = el("button", "font-size:var(--am-font-control);", "刷新");
+    const undo = el("button", "font-size:var(--am-font-control);", "撤销上次操作");
+    const bulk = el("button", "font-size:var(--am-font-control);");
+    const last = el("span", "margin-right:auto;align-self:center;font-size:var(--am-font-secondary);color:var(--text-muted);");
     refreshHistory = () => {
         const operation = history ? history.latest() : null;
         last.textContent = operation ? "上次操作：" + operation.label : "";

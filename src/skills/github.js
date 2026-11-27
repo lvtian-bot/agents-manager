@@ -2,6 +2,8 @@ const { parseSkillFrontmatter, skillCreationTarget, skillSourceChange } = requir
 const { createSkill, snapshotDirectoryFiles } = require("./links");
 
 const EXCLUDED_SEGMENTS = new Set([".git", ".github", ".gitignore", "node_modules"]);
+const RAW_HEADERS = { "User-Agent": "agents-manager-obsidian-plugin" };
+const API_HEADERS = { ...RAW_HEADERS, Accept: "application/vnd.github+json" };
 
 function decodeSegment(segment) {
     try {
@@ -36,24 +38,6 @@ function parseGitHubUrl(rawUrl) {
     };
 }
 
-function githubAuth(settings) {
-    const varName = settings?.githubCredentialVariable;
-    const token = varName ? process.env[varName] : "";
-    return { token: token || "", hasAuth: Boolean(token) };
-}
-
-function buildHeaders(settings, accept) {
-    const auth = githubAuth(settings);
-    const headers = {
-        Accept: accept || "application/vnd.github+json",
-        "User-Agent": "agents-manager-obsidian-plugin",
-    };
-    if (auth.hasAuth) {
-        headers.Authorization = "Bearer " + auth.token;
-    }
-    return { headers, hasAuth: auth.hasAuth };
-}
-
 async function checkResponseError(response, url) {
     if (response.ok) return;
     let bodyText = "";
@@ -63,20 +47,20 @@ async function checkResponseError(response, url) {
         // Ignore unread body errors.
     }
     const remaining = response.headers?.get?.("x-ratelimit-remaining");
-    if (response.status === 403 && (remaining === "0" || /rate limit/i.test(bodyText))) {
-        throw new Error("GitHub API 请求达到速率限制；可在插件设置中配置 GitHub 凭据环境变量后重试。");
+    if (response.status === 429 || (response.status === 403 && (remaining === "0" || /rate limit/i.test(bodyText)))) {
+        throw new Error("GitHub 请求过于频繁，请稍后再试。");
     }
     throw new Error("GitHub 请求失败（HTTP " + response.status + "）：" + url);
 }
 
-async function fetchJson(url, headers, cache = "default") {
-    const response = await fetch(url, { headers, cache });
+async function fetchJson(url, cache = "default") {
+    const response = await fetch(url, { headers: API_HEADERS, cache });
     await checkResponseError(response, url);
     return response.json();
 }
 
-async function fetchBuffer(url, headers) {
-    const response = await fetch(url, { headers });
+async function fetchBuffer(url) {
+    const response = await fetch(url, { headers: RAW_HEADERS });
     await checkResponseError(response, url);
     return Buffer.from(await response.arrayBuffer());
 }
@@ -98,15 +82,15 @@ function classifyRelPath(relPath) {
     return true;
 }
 
-async function fetchCommits(parsed, headers) {
+async function fetchCommits(parsed) {
     const params = new URLSearchParams({ per_page: "1" });
     if (parsed.branch) params.set("sha", parsed.branch);
     if (parsed.subpath) params.set("path", parsed.subpath);
     const url = `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/commits?${params.toString()}`;
-    return fetchJson(url, headers, "no-cache");
+    return fetchJson(url, "no-cache");
 }
 
-async function resolveSlashRef(parsed, headers) {
+async function resolveSlashRef(parsed) {
     if (!parsed.treeSegments || parsed.treeSegments.length <= 1) return null;
     const fullRest = parsed.treeSegments.join("/");
     const firstPrefix = parsed.treeSegments[0];
@@ -114,7 +98,7 @@ async function resolveSlashRef(parsed, headers) {
         const refUrl = `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/git/matching-refs/${kind}/${encodeURIComponent(firstPrefix)}`;
         let refs;
         try {
-            refs = await fetchJson(refUrl, headers);
+            refs = await fetchJson(refUrl);
         } catch {
             continue;
         }
@@ -139,21 +123,20 @@ async function resolveSlashRef(parsed, headers) {
     return null;
 }
 
-async function fetchLatestRevision(url, settings) {
+async function fetchLatestRevision(url) {
     let parsed = parseGitHubUrl(url);
-    const { headers } = buildHeaders(settings);
     let commits = null;
     let firstError = null;
     try {
-        commits = await fetchCommits(parsed, headers);
+        commits = await fetchCommits(parsed);
     } catch (error) {
         firstError = error;
     }
     if ((!Array.isArray(commits) || !commits.length) && parsed.treeSegments.length > 1) {
-        const resolved = await resolveSlashRef(parsed, headers);
+        const resolved = await resolveSlashRef(parsed);
         if (resolved) {
             parsed = resolved;
-            commits = await fetchCommits(parsed, headers);
+            commits = await fetchCommits(parsed);
             firstError = null;
         }
     }
@@ -196,9 +179,9 @@ function createUpdateChecks(app) {
         return { ...entry, status: revisionStatus(source.commit, entry.latestCommit) };
     }
 
-    function fetchLatest(url, settings) {
+    function fetchLatest(url) {
         if (pending.has(url)) return pending.get(url);
-        const request = fetchLatestRevision(url, settings).then(result => {
+        const request = fetchLatestRevision(url).then(result => {
             if (pending.get(url) === request) {
                 const entry = { latestCommit: result.latestCommit, commitMessage: result.commitMessage, checkedAt: Date.now() };
                 results.set(url, entry);
@@ -219,10 +202,10 @@ function createUpdateChecks(app) {
     return { status, fetchLatest, dispose: () => pending.clear() };
 }
 
-async function listEntriesViaContents(parsed, targetSha, dirPath, headers) {
+async function listEntriesViaContents(parsed, targetSha, dirPath) {
     const encoded = dirPath ? "/" + encodeUriPath(dirPath) : "";
     const url = `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/contents${encoded}?ref=${encodeURIComponent(targetSha)}`;
-    const items = await fetchJson(url, headers);
+    const items = await fetchJson(url);
     const list = Array.isArray(items) ? items : [items];
     const entries = [];
     const prefix = parsed.subpath ? parsed.subpath + "/" : "";
@@ -234,7 +217,7 @@ async function listEntriesViaContents(parsed, targetSha, dirPath, headers) {
                 throw new Error("上游包含不安全的文件路径：" + subRel);
             }
             if (subRel.split("/").some(seg => EXCLUDED_SEGMENTS.has(seg.toLowerCase()))) continue;
-            entries.push(...await listEntriesViaContents(parsed, targetSha, item.path, headers));
+            entries.push(...await listEntriesViaContents(parsed, targetSha, item.path));
         } else if (item.type === "symlink") {
             const rel = prefix ? (item.path.startsWith(prefix) ? item.path.slice(prefix.length) : "") : item.path;
             if (classifyRelPath(rel)) {
@@ -243,20 +226,19 @@ async function listEntriesViaContents(parsed, targetSha, dirPath, headers) {
         } else if (item.type === "file") {
             const rel = prefix ? (item.path.startsWith(prefix) ? item.path.slice(prefix.length) : "") : item.path;
             if (classifyRelPath(rel)) {
-                entries.push({ rel, repoPath: item.path, sha: item.sha, mode: item.mode || "100644" });
+                entries.push({ rel, repoPath: item.path, mode: item.mode || "100644" });
             }
         }
     }
     return entries;
 }
 
-async function listTreeEntries(parsed, targetSha, settings) {
-    const { headers } = buildHeaders(settings);
+async function listTreeEntries(parsed, targetSha) {
     const treeUrl = `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/git/trees/${encodeURIComponent(targetSha)}?recursive=1`;
-    const treeData = await fetchJson(treeUrl, headers);
+    const treeData = await fetchJson(treeUrl);
 
     if (treeData.truncated) {
-        const entries = await listEntriesViaContents(parsed, targetSha, parsed.subpath, headers);
+        const entries = await listEntriesViaContents(parsed, targetSha, parsed.subpath);
         if (!entries.some(entry => entry.rel === "SKILL.md")) {
             throw new Error("上游目录中未找到 SKILL.md，已取消更新。");
         }
@@ -276,7 +258,7 @@ async function listTreeEntries(parsed, targetSha, settings) {
         if (item.type === "commit" || item.mode === "160000") {
             throw new Error("上游技能包含不支持的子模块条目（" + rel + "），已取消更新。");
         }
-        entries.push({ rel, repoPath: item.path, sha: item.sha, mode: item.mode || "100644" });
+        entries.push({ rel, repoPath: item.path, mode: item.mode || "100644" });
     }
 
     if (!entries.some(entry => entry.rel === "SKILL.md")) {
@@ -285,23 +267,20 @@ async function listTreeEntries(parsed, targetSha, settings) {
     return entries;
 }
 
-async function downloadEntries(parsed, targetSha, entries, settings) {
-    const { headers, hasAuth } = buildHeaders(settings, "application/vnd.github.raw+json");
+async function downloadEntries(parsed, targetSha, entries) {
     const files = [];
     for (const entry of entries) {
-        const url = hasAuth
-            ? `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/git/blobs/${encodeURIComponent(entry.sha)}`
-            : `https://raw.githubusercontent.com/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/${encodeURIComponent(targetSha)}/${encodeUriPath(entry.repoPath)}`;
-        const buf = await fetchBuffer(url, hasAuth ? headers : { "User-Agent": "agents-manager-obsidian-plugin" });
+        const url = `https://raw.githubusercontent.com/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/${encodeURIComponent(targetSha)}/${encodeUriPath(entry.repoPath)}`;
+        const buf = await fetchBuffer(url);
         files.push({ rel: entry.rel, base64: buf.toString("base64"), mode: entry.mode === "100755" ? 0o755 : 0o644 });
     }
     files.sort((a, b) => a.rel.localeCompare(b.rel));
     return files;
 }
 
-async function downloadGitHubSkill(url, check, settings) {
-    const entries = await listTreeEntries(check.parsed, check.latestCommit, settings);
-    const files = await downloadEntries(check.parsed, check.latestCommit, entries, settings);
+async function downloadGitHubSkill(url, check) {
+    const entries = await listTreeEntries(check.parsed, check.latestCommit);
+    const files = await downloadEntries(check.parsed, check.latestCommit, entries);
     return { files, parsed: check.parsed, source: {
         kind: "github",
         url,
@@ -310,10 +289,10 @@ async function downloadGitHubSkill(url, check, settings) {
     } };
 }
 
-async function updateGitHubSkill(history, stateRoot, skill, settings, checks) {
-    const check = await checks.fetchLatest(skill.source.url, settings);
+async function updateGitHubSkill(history, stateRoot, skill, checks) {
+    const check = await checks.fetchLatest(skill.source.url);
     if (revisionStatus(skill.source.commit, check.latestCommit) === "up-to-date") return null;
-    const { files, source } = await downloadGitHubSkill(skill.source.url, check, settings);
+    const { files, source } = await downloadGitHubSkill(skill.source.url, check);
     await history.apply({
         type: "github-update",
         label: "更新 " + skill.name + "（" + source.commit.slice(0, 7) + "）",
@@ -326,9 +305,9 @@ async function updateGitHubSkill(history, stateRoot, skill, settings, checks) {
     return { latestCommit: source.commit, fileCount: files.length };
 }
 
-async function importGitHubSkill(history, stateRoot, scope, url, settings, checks) {
-    const check = await checks.fetchLatest(url, settings);
-    const { files, parsed, source } = await downloadGitHubSkill(url, check, settings);
+async function importGitHubSkill(history, stateRoot, scope, url, checks) {
+    const check = await checks.fetchLatest(url);
+    const { files, parsed, source } = await downloadGitHubSkill(url, check);
     const md = files.find(file => file.rel === "SKILL.md");
     const frontmatter = parseSkillFrontmatter(Buffer.from(md.base64, "base64").toString("utf8"));
     const fallback = parsed.subpath.split("/").at(-1) || parsed.repo;

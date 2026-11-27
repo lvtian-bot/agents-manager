@@ -25,17 +25,17 @@ const {
 const { parseGitHubUrl, createUpdateChecks, updateGitHubSkill, importGitHubSkill } = require("./github");
 
 const TAB_BASE_STYLE =
-    "flex:1;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;box-shadow:none;" +
+    "flex:1 1 auto;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:var(--am-font-control);box-shadow:none;" +
     "background:transparent;border:1px solid transparent;color:var(--text-muted);";
 const TAB_ACTIVE_STYLE =
-    "flex:1;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;box-shadow:none;" +
+    "flex:1 1 auto;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:var(--am-font-control);box-shadow:none;" +
     "background:var(--background-secondary);border:1px solid var(--background-modifier-border);" +
     "color:var(--text-normal);font-weight:600;";
 const SKILL_CELL_STYLE =
     "padding:5px 8px;border:0;border-bottom:1px solid var(--background-modifier-border);" +
-    "vertical-align:middle;font-size:12px;";
+    "vertical-align:middle;font-size:var(--am-font-control);";
 const SKILL_ACTION_STYLE =
-    "font-size:12px;padding:3px 7px;min-height:26px;height:auto;white-space:nowrap;";
+    "font-size:var(--am-font-control);padding:3px 7px;min-height:28px;height:auto;white-space:nowrap;";
 
 function el(tag, cssText, textContent) {
     const node = document.createElement(tag);
@@ -65,7 +65,7 @@ function mountSkills(plugin, host) {
     host.appendChild(footer);
 
     content.appendChild(el("div",
-        "margin-bottom:14px;line-height:1.6;color:var(--text-muted);",
+        "margin-bottom:14px;line-height:1.5;color:var(--text-muted);font-size:var(--am-font-secondary);",
         "技能来自用户主目录、当前 Obsidian 库和已登记项目下的 .agents/skills。每个技能放在单独的子目录中，目录内须有 SKILL.md。"));
 
     function createModal(options) {
@@ -166,7 +166,7 @@ function mountSkills(plugin, host) {
     }
 
     function skillTypeSelect(label, value) {
-        const select = el("select", "font-size:12px;");
+        const select = el("select", "font-size:var(--am-font-control);");
         select.setAttribute("aria-label", label);
         for (const [kind, name] of [["self", "自建"], ["github", "GitHub"]]) {
             const option = el("option", null, name);
@@ -199,7 +199,7 @@ function mountSkills(plugin, host) {
         }
         const pre = el("pre",
             "margin:0;padding:12px;border:1px solid var(--background-modifier-border);border-radius:6px;" +
-            "background:var(--background-secondary);font-family:var(--font-monospace);font-size:12px;" +
+            "background:var(--background-secondary);font-family:var(--font-monospace);font-size:var(--font-ui-medium,15px);" +
             "line-height:1.6;white-space:pre-wrap;word-break:break-word;overflow:auto;flex:1;",
             text);
         modal.body.appendChild(pre);
@@ -239,7 +239,7 @@ function mountSkills(plugin, host) {
         editor.value = beforeText;
         editor.style.cssText =
             "width:100%;min-height:360px;flex:1;padding:10px;border:1px solid var(--background-modifier-border);" +
-            "border-radius:6px;font-family:var(--font-monospace);font-size:12px;line-height:1.6;resize:vertical;";
+            "border-radius:6px;font-family:var(--font-monospace);font-size:var(--font-ui-medium,15px);line-height:1.6;resize:vertical;";
 
         const updateLint = () => {
             const parsed = parseSkillFrontmatter(editor.value);
@@ -354,7 +354,7 @@ function mountSkills(plugin, host) {
                     parseGitHubUrl(parsed.url);
                     if (!skill) {
                         const scope = destination();
-                        await importGitHubSkill(history, stateRoot, scope, parsed.url, plugin.settings, checks);
+                        await importGitHubSkill(history, stateRoot, scope, parsed.url, checks);
                         activeScopeKey = scope.key;
                         return;
                     }
@@ -547,7 +547,7 @@ function mountSkills(plugin, host) {
         if (!scope.harnessStates.length) {
             parent.appendChild(el("div",
                 "margin-bottom:12px;padding:10px 12px;border:1px solid var(--background-modifier-border);" +
-                "border-radius:6px;font-size:12px;color:var(--text-muted);",
+                "border-radius:6px;font-size:var(--am-font-secondary);color:var(--text-muted);",
                 "尚未配置分发目标，可点击上方「管理分发目标」添加。"));
             return;
         }
@@ -559,19 +559,19 @@ function mountSkills(plugin, host) {
                 "border:1px solid var(--background-modifier-border);border-radius:6px;" +
                 "background:var(--background-secondary);");
             const info = el("div", "flex:1;min-width:220px;");
-            info.appendChild(el("div", "font-weight:600;font-size:13px;", hState.name));
+            info.appendChild(el("div", "font-weight:600;", hState.name));
             info.appendChild(el("div",
-                "font-family:var(--font-monospace);font-size:11px;color:var(--text-muted);word-break:break-all;",
+                "font-family:var(--font-monospace);font-size:var(--am-font-secondary);color:var(--text-muted);word-break:break-all;",
                 hState.targetDir));
 
-            const statusEl = el("span", "font-size:12px;");
+            const statusEl = el("span", "font-size:var(--am-font-control);");
             row.appendChild(info);
 
             if (hState.status === "whole-dir-linked") {
                 statusEl.style.color = "var(--text-accent)";
                 statusEl.textContent = "整目录已链接";
                 row.appendChild(statusEl);
-                const convertBtn = el("button", null, "转为逐个链接");
+                const convertBtn = el("button", "font-size:var(--am-font-control);", "转为逐个链接");
                 convertBtn.className = "mod-cta";
                 convertBtn.onclick = async () => {
                     const msg = "将把 " + hState.name + " 的整目录链接（" + hState.targetDir + "）替换为真实目录，" +
@@ -637,11 +637,11 @@ function mountSkills(plugin, host) {
                 "display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 0;" +
                 "border-top:1px solid var(--background-modifier-border);");
             const meta = el("div", "flex:1;min-width:200px;");
-            meta.appendChild(el("div", "font-size:13px;", item.harnessName + " / " + item.broken.name));
+            meta.appendChild(el("div", null, item.harnessName + " / " + item.broken.name));
             meta.appendChild(el("div",
-                "font-family:var(--font-monospace);font-size:11px;color:var(--text-muted);word-break:break-all;",
+                "font-family:var(--font-monospace);font-size:var(--am-font-secondary);color:var(--text-muted);word-break:break-all;",
                 item.broken.linkPath));
-            const cleanBtn = el("button", null, "清理");
+            const cleanBtn = el("button", "font-size:var(--am-font-control);", "清理");
             cleanBtn.onclick = async () => {
                 cleanBtn.disabled = true;
                 try {
@@ -689,10 +689,11 @@ function mountSkills(plugin, host) {
         const row = el("tr");
         const info = el("th", SKILL_CELL_STYLE + "text-align:left;font-weight:400;min-width:140px;");
         info.setAttribute("scope", "row");
-        info.appendChild(el("div", "font-weight:600;overflow-wrap:anywhere;", skill.name));
+        info.appendChild(el("div", "font-weight:600;font-size:var(--am-font-primary);overflow-wrap:anywhere;", skill.name));
         const summary = skill.description || "（无 description 说明）";
         const description = el("div",
-            "max-width:30ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted);", summary);
+            "max-width:30ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" +
+            "font-size:var(--am-font-secondary);color:var(--text-muted);", summary);
         description.title = summary;
         info.appendChild(description);
         if (skill.issues.length) {
@@ -787,7 +788,7 @@ function mountSkills(plugin, host) {
                 updating = true;
                 updateBtn.disabled = true;
                 try {
-                    const res = await exclusive(() => updateGitHubSkill(history, stateRoot, skill, plugin.settings, checks));
+                    const res = await exclusive(() => updateGitHubSkill(history, stateRoot, skill, checks));
                     if (res) new Notice("已更新 " + skill.name + "（" + res.latestCommit.slice(0, 7) + "）");
                     await safeRefresh();
                 } catch (error) {
@@ -875,12 +876,13 @@ function mountSkills(plugin, host) {
             const secMeta = el("div", "flex:1;min-width:0;");
             secMeta.appendChild(el("div", "font-weight:600;", scope.name));
             secMeta.appendChild(el("div",
-                "font-weight:400;font-size:11px;color:var(--text-muted);margin-top:3px;font-family:var(--font-monospace);word-break:break-all;",
+                "font-size:var(--am-font-secondary);color:var(--text-muted);margin-top:3px;" +
+                "font-family:var(--font-monospace);word-break:break-all;",
                 "源目录：" + scope.sourceRoot));
-            const manageBtn = el("button", "flex-shrink:0;", "管理分发目标");
+            const manageBtn = el("button", "flex-shrink:0;font-size:var(--am-font-control);", "管理分发目标");
             manageBtn.type = "button";
             manageBtn.onclick = () => openTargetsModal(scope.kind === "user");
-            const createBtn = el("button", "flex-shrink:0;", "新建技能");
+            const createBtn = el("button", "flex-shrink:0;font-size:var(--am-font-control);", "新建技能");
             createBtn.type = "button";
             createBtn.onclick = () => openCreateMenu(createBtn, scope);
             secHeader.appendChild(secMeta);
@@ -893,7 +895,8 @@ function mountSkills(plugin, host) {
 
             if (!scope.skills.length) {
                 const emptyCard = el("div",
-                    "border:1px solid var(--background-modifier-border);border-radius:6px;padding:14px;color:var(--text-muted);",
+                    "border:1px solid var(--background-modifier-border);border-radius:6px;padding:14px;" +
+                    "font-size:var(--am-font-secondary);color:var(--text-muted);",
                     "当前目录中尚未发现含 SKILL.md 的技能子文件夹。");
                 pane.appendChild(emptyCard);
             } else {
@@ -933,11 +936,11 @@ function mountSkills(plugin, host) {
         }
     }
 
-    const last = el("span", "margin-right:auto;align-self:center;");
-    const refreshButton = el("button", null, "刷新");
-    const checkUpdatesButton = el("button", null, "检查更新");
-    const undoButton = el("button", null, "撤销上次操作");
-    const bulkButton = el("button", null, "一键分发");
+    const last = el("span", "margin-right:auto;align-self:center;font-size:var(--am-font-secondary);color:var(--text-muted);");
+    const refreshButton = el("button", "font-size:var(--am-font-control);", "刷新");
+    const checkUpdatesButton = el("button", "font-size:var(--am-font-control);", "检查更新");
+    const undoButton = el("button", "font-size:var(--am-font-control);", "撤销上次操作");
+    const bulkButton = el("button", "font-size:var(--am-font-control);", "一键分发");
 
     refreshHistory = () => {
         const op = history ? history.latest() : null;
@@ -965,7 +968,7 @@ function mountSkills(plugin, host) {
             if (closed) return;
             if (!force && checks.status({ url })?.latestCommit) continue;
             try {
-                await checks.fetchLatest(url, plugin.settings);
+                await checks.fetchLatest(url);
             } catch {
                 // 查询错误由对应技能行展示，其余来源继续检查。
             }
