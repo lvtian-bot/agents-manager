@@ -323,7 +323,13 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
     }
 });
 
-test("全新安装可保存指令设置，模型连接留空时不发起 AI 请求", async () => {
+test("全新安装可在各指令同步标签页设置来源，模型连接留空时不发起 AI 请求", async (t) => {
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-instruction-sources-"));
+    t.after(() => fs.rmSync(fixtureDir, { recursive: true, force: true }));
+    const vaultRoot = path.join(fixtureDir, "vault");
+    fs.mkdirSync(vaultRoot);
+    fs.writeFileSync(path.join(vaultRoot, "我的指令.md"), "用户指令。\n", "utf8");
+    const markdownFiles = [{ path: "我的指令.md" }, { path: "Work模板.md" }, { path: "Code模板.md" }];
     const notices = [];
     const saved = [];
     const app = {
@@ -331,10 +337,21 @@ test("全新安装可保存指令设置，模型连接留空时不发起 AI 请�
             getActiveFile: () => ({ path: "笔记.md" }),
             activeEditor: { editor: { getSelection: () => "Selected text" } },
         },
+        vault: {
+            adapter: { getBasePath: () => vaultRoot },
+            getMarkdownFiles: () => markdownFiles,
+        },
     };
     const { body, invoke, plugin } = await loadPlugin(app, {
+        fixtureDir,
         notices,
         save: settings => saved.push(settings),
+        pick: picker => {
+            const file = picker.getItems()[1];
+            assert.equal(picker.getItemText(file), "Work模板.md");
+            picker.onChooseItem(file);
+            picker.onClose();
+        },
         fetch: () => assert.fail("模型连接留空时不应发起请求"),
     });
     const tab = plugin.settingTab;
@@ -344,17 +361,61 @@ test("全新安装可保存指令设置，模型连接留空时不发起 AI 请�
     const [save] = findElements(root, el => el.tag === "button" && el.textContent === "保存设置");
     for (const label of ["模型接口", "模型名称", "凭据环境变量名"]) assert.equal(field(label).value, "");
 
-    field("用户指令源笔记").value = "我的指令.md";
-    await save.onclick();
+    const source = label => findElements(body, el => el.getAttribute("aria-label") === label)[0];
+    const buttonIn = (container, label) =>
+        findElements(container, el => el.tag === "button" && el.textContent === label)[0];
+    const activateTab = prefix =>
+        findElements(body, el => el.tag === "button" && el.textContent.startsWith(prefix))[0].onclick();
+    const saveSource = input => buttonIn(input.parent.parent, "保存").onclick();
+    const userLabel = "用户指令源笔记";
+    const workLabel = "Work 项目模板";
+    const codeLabel = "Code 项目模板";
+    for (const label of [userLabel, workLabel, codeLabel]) assert.equal(field(label), undefined);
+
+    await invoke("sync-instructions");
+    const userInput = source(userLabel);
+    assert.equal(userInput.placeholder, "请选择来源笔记。");
+    userInput.value = "../库外.md";
+    await saveSource(userInput);
+    assert.equal(saved.length, 0);
+    assert.equal(userInput.getAttribute("aria-invalid"), "true");
+
+    userInput.value = "我的指令.md";
+    await saveSource(userInput);
     assert.equal(saved[0].userSource, "我的指令.md");
+    assert.equal(source(userLabel).value, "我的指令.md");
+    assert.equal(findElements(body, el => el.textContent === "第一级不可用").length, 0);
+
+    activateTab("第二级：Work 类型");
+    source("选择" + workLabel).onclick();
+    assert.equal(source(workLabel).value, "Work模板.md");
+    assert.equal(saved.length, 1);
+    await saveSource(source(workLabel));
+    assert.equal(saved[1].workSource, "Work模板.md");
+    assert.equal(source(workLabel).parent.parent.parent.parent.style.display, "");
+
+    activateTab("第二级：Code 类型");
+    source(codeLabel).value = "Code模板.md";
+    await saveSource(source(codeLabel));
+    assert.equal(saved[2].codeSource, "Code模板.md");
+    assert.equal(saved[2].userSource, "我的指令.md");
+    assert.equal(saved[2].workSource, "Work模板.md");
+    assert.equal(findElements(body, el => /user-instructions-sync\.json|instruction-projects\.json/.test(el.textContent)).length, 0);
     assert.equal(saved[0].endpoint, "");
     assert.equal(saved[0].model, "");
     assert.equal(saved[0].credentialVariable, "");
 
     field("模型接口").value = "https://example.org/v1/chat/completions";
     await save.onclick();
-    assert.equal(saved.length, 1);
+    assert.equal(saved.length, 3);
     assert.equal(field("模型名称").getAttribute("aria-invalid"), "true");
+    field("模型接口").value = "";
+    await save.onclick();
+    assert.equal(saved[3].userSource, "我的指令.md");
+    assert.equal(saved[3].workSource, "Work模板.md");
+    assert.equal(saved[3].codeSource, "Code模板.md");
+    plugin.app.workspace.getActiveFile = () => ({ path: "笔记.md" });
+    await plugin.app.workspace.getLeavesOfType("agents-manager-workspace")[0].detach();
 
     await invoke("summarize-note");
     await invoke("translate-selection");
@@ -560,7 +621,7 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
 
     assert.equal(read(target), previousProject);
     const [alreadySynced] = findElements(plugin.body, (element) => element.textContent === "已同步");
-    assert.equal(alreadySynced.disabled, true);
+    assert.equal(alreadySynced.tag, "div");
 
     const [distribute] = findElements(plugin.body, (element) => element.textContent === "备份并分发");
     await distribute.onclick();
@@ -829,7 +890,14 @@ test("同步面板操作后原地刷新保留标签页与滚动位置，并支�
     write(targetA, v2FromA + "\n" + bodyA);
     await button("刷新").onclick();
     assertStayedInWorkTab("第二级：Work 类型（2 待处理）");
-    assert.ok(button("行级对比合并…"));
+    const [conflictStatus] = findElements(plugin.body, node => node.textContent === "两边都有修改");
+    const [remove, merge, recycle, overwrite] = findElements(conflictStatus.parent, node => node.tag === "button");
+    assert.deepEqual([remove.textContent, merge.textContent, recycle.textContent, overwrite.textContent],
+        ["×", "行级对比合并…", "用项目版本回收进模板", "用模板覆盖此项目"]);
+    assert.notEqual(remove.parent, merge.parent);
+    assert.equal(merge.className, "mod-cta");
+    assert.notEqual(recycle.className, "mod-cta");
+    assert.notEqual(overwrite.className, "mod-cta");
     assert.ok(button("备份并分发"));
 
     // 4. 行级对比合并项目A写回后，主面板原地刷新且待处理计数准确降至 1。
