@@ -1560,7 +1560,7 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
 
     await plugin.invoke("manage-skills");
     assert.equal(button("技能管理").getAttribute("aria-selected"), "true");
-    assert.equal(button("技能管理").children[0].getAttribute("data-icon"), "blocks");
+    assert.equal(button("技能管理").children[0].getAttribute("data-icon"), "library");
     assert.doesNotMatch(button("指令同步").style.cssText, /border-bottom-color/);
     workspace.setActiveLeaf(workspace.getLeaf("tab"));
     await ribbon.callback();

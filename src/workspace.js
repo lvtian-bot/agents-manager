@@ -6,7 +6,7 @@ const WORKSPACE_VIEW_ICON = "layers";
 
 const SECTION_DEFS = [
     { key: "instructions", label: "指令同步", icon: "refresh-cw" },
-    { key: "skills", label: "技能管理", icon: "blocks" },
+    { key: "skills", label: "技能管理", icon: "library" },
 ];
 
 const NAV_BASE_STYLE =
