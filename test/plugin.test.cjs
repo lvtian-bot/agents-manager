@@ -239,8 +239,7 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
     const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-settings-"));
     try {
         const app = { vault: { adapter: { getBasePath: () => fixtureDir }, getMarkdownFiles: () => [{ path: "模板/摘要.md" }] } };
-        let choices;
-        const options = { notices, menu: items => { choices = items; }, save: value => saved.push(value), pick: picker => {
+        const options = { notices, save: value => saved.push(value), pick: picker => {
             picker.onChooseItem(picker.getItems()[0]);
             picker.onClose();
         } };
@@ -264,9 +263,9 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
         const button = text => nodes(element => element.tag === "button" && element.textContent === text)[0];
         const save = () => button("保存设置").onclick();
         tab.display();
-        assert.equal(nodes(element => element.textContent === "×").length, 6);
-        assert.equal(fields("目标文件").length, 0);
-        assert.equal(button("添加目标").disabled, true);
+        assert.equal(nodes(element => element.textContent === "用户指令目标").length, 0);
+        assert.equal(nodes(element => element.tag === "button" && element.textContent === "添加目标").length, 0);
+        assert.equal(fields("移除 Claude").length, 0);
         assert.equal(fields("提示词笔记")[0].value, "旧模板.md");
         assert.equal(fields("总结模式")[0].value, "multiple");
         assert.equal(fields("模型接口")[0].value, "https://legacy.example.org/v1/chat/completions");
@@ -275,13 +274,6 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
         assert.ok(nodes(element => element.tag === "details").every(element => !element.open));
         fields("选择未匹配时使用的提示词")[0].onclick();
         assert.equal(fields("未匹配时使用的提示词")[0].value, "模板/摘要.md");
-        fields("移除 Claude")[0].onclick();
-        button("添加目标").onclick();
-        assert.deepEqual(Array.from(choices, item => item.title), ["Claude"]);
-        choices[0].action();
-        assert.equal(button("添加目标").disabled, true);
-        fields("移除 Codex")[0].onclick();
-        assert.ok(plugin.settings.targets.Codex);
         fields("模型接口")[0].value = "无效地址";
         await save();
         assert.ok(fields("模型接口")[0].closest("details").open);
@@ -290,7 +282,7 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
         fields("模型接口")[0].value = "https://example.org/v1/chat/completions";
         await save();
         assert.equal(saved.length, 1);
-        assert.equal(saved[0].targets.Codex, undefined);
+        assert.equal(saved[0].targets.Codex, "~/.codex/AGENTS.md");
         assert.equal(saved[0].targets.Claude, "~/.claude/CLAUDE.md");
         assert.equal(saved[0].extra, 7);
         assert.equal(saved[0].model, "saved-model");
@@ -298,7 +290,6 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
         assert.deepEqual(notices, ["设置已保存。"]);
         tab.display();
         assert.equal(fields("未匹配时使用的提示词")[0].value, "模板/摘要.md");
-        assert.equal(fields("移除 Codex").length, 0);
         plugin.settings.targets = { Codex: "~/legacy.md", 自定义: "~/custom.md" };
         tab.display();
         await save();
@@ -866,7 +857,7 @@ test("同步面板操作后原地刷新保留标签页与滚动位置，并支�
 });
 
 
-test("设置页支持技能分发目标与 GitHub 凭据变量校验和保存", async () => {
+test("设置页仅保留 GitHub 凭据变量校验和保存，且不覆写技能分发目标", async () => {
     const saved = [];
     const notices = [];
     const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-skill-settings-"));
@@ -887,31 +878,225 @@ test("设置页支持技能分发目标与 GitHub 凭据变量校验和保存", 
         const button = (text, index = 0) => nodes(el => el.tag === "button" && el.textContent === text)[index];
         const fields = label => nodes(el => el.getAttribute("aria-label") === label);
 
-        // 项目级目标禁止填为 .agents/skills 本身
-        fields("相对技能目录")[0].value = ".agents/skills";
-        await button("保存设置").onclick();
-        assert.equal(saved.length, 0);
-        assert.equal(fields("相对技能目录")[0].getAttribute("aria-invalid"), "true");
+        assert.equal(fields("技能目录").length, 0);
+        assert.equal(fields("相对技能目录").length, 0);
 
-        fields("相对技能目录")[0].value = ".claude/skills";
         fields("GitHub 凭据环境变量名")[0].value = "invalid-var";
         await button("保存设置").onclick();
         assert.equal(saved.length, 0);
         assert.ok(fields("GitHub 凭据环境变量名")[0].closest("details").open);
 
         fields("GitHub 凭据环境变量名")[0].value = "TEST_GH_TOKEN";
-        button("添加目标", 1).onclick();
-        fields("工具名称")[2].value = "CustomTool";
-        fields("技能目录")[2].value = "~/custom-skills";
         await button("保存设置").onclick();
 
         assert.equal(saved.length, 1);
-        assert.equal(saved[0].skillUserTargets.CustomTool, "~/custom-skills");
+        assert.deepEqual({ ...saved[0].skillUserTargets }, {
+            Claude: "~/.claude/skills",
+            Antigravity: "~/.gemini/config/skills",
+        });
+        assert.deepEqual({ ...saved[0].skillProjectTargets }, { Claude: ".claude/skills" });
         assert.equal(saved[0].githubCredentialVariable, "TEST_GH_TOKEN");
         assert.deepEqual(notices, ["设置已保存。"]);
     } finally {
         fs.rmSync(fixtureDir, { recursive: true, force: true });
     }
+});
+
+test("指令同步第一级可在页面内添加与移出用户指令目标", async (t) => {
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-layer1-targets-"));
+    t.after(() => fs.rmSync(fixtureDir, { recursive: true, force: true }));
+
+    const vaultRoot = path.join(fixtureDir, "vault");
+    const homeDir = path.join(fixtureDir, "home");
+    const codexTarget = path.join(homeDir, ".codex", "AGENTS.md");
+    const customTarget = path.join(homeDir, "custom.md");
+    fs.mkdirSync(vaultRoot, { recursive: true });
+    fs.writeFileSync(path.join(vaultRoot, "用户指令.md"), "用户指令内容\n", "utf8");
+    fs.mkdirSync(path.dirname(codexTarget), { recursive: true });
+    fs.writeFileSync(codexTarget, "旧目标内容\n", "utf8");
+
+    const saved = [];
+    const notices = [];
+    let choices = [];
+    const tick = () => new Promise(resolve => setImmediate(resolve));
+
+    const plugin = await loadPlugin({
+        workspace: { getActiveFile: () => null, getLeavesOfType: () => [] },
+        vault: { adapter: { getBasePath: () => vaultRoot } },
+    }, {
+        fixtureDir,
+        notices,
+        save: value => saved.push(value),
+        menu: items => { choices = items; },
+        settings: {
+            userSource: "用户指令.md",
+            targets: {},
+        },
+    });
+
+    const instructionsHost = () => plugin.body.children[0].children[0].children[1].children[0];
+    const buttonIn = (label) => {
+        for (const modal of plugin.body.children.slice(1).reverse()) {
+            const hit = findElements(modal, node => node.tag === "button" && node.textContent === label);
+            if (hit.length) return hit[0];
+        }
+        const hit = findElements(instructionsHost(), node => node.tag === "button" && node.textContent === label);
+        assert.ok(hit.length > 0, label);
+        return hit[0];
+    };
+    const removeButton = (name) => findElements(instructionsHost(), node => node.getAttribute("aria-label") === "移出 " + name);
+
+    await plugin.invoke("sync-instructions");
+    assert.ok(findElements(instructionsHost(), n => n.textContent?.includes("尚未添加用户指令目标，可点击上方「添加目标」选择要分发的工具。")).length > 0);
+    assert.equal(buttonIn("添加目标").disabled, false);
+
+    // 打开菜单并添加 Codex
+    buttonIn("添加目标").onclick();
+    assert.equal(choices.length, 6);
+    assert.equal(choices[0].title, "Codex");
+    await choices[0].action();
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].targets.Codex, "~/.codex/AGENTS.md");
+    assert.equal(notices.at(-1), "已添加用户指令目标：Codex");
+    assert.equal(removeButton("Codex").length, 1);
+
+    // 取消移出保留目标；确认移出后持久化删除且不删文件
+    const cancelRemove = removeButton("Codex")[0].onclick();
+    await tick();
+    assert.ok(findElements(plugin.body, n => n.textContent?.includes("将把 Codex 从用户指令分发列表移出")).length > 0);
+    buttonIn("取消").onclick();
+    await cancelRemove;
+    assert.equal(removeButton("Codex").length, 1);
+
+    const confirmRemove = removeButton("Codex")[0].onclick();
+    await tick();
+    buttonIn("移出列表").onclick();
+    await confirmRemove;
+    await tick();
+    assert.equal(saved.at(-1).targets.Codex, undefined);
+    assert.equal(fs.existsSync(codexTarget), true);
+    assert.equal(notices.at(-1), "已将 Codex 移出用户指令分发列表（目标文件未改动）。");
+    assert.equal(removeButton("Codex").length, 0);
+
+    // 添加全部 6 个内置目标后「添加目标」置灰，同时保留已有自定义目标
+    plugin.plugin.settings.targets = { 自定义: "~/custom.md" };
+    fs.writeFileSync(customTarget, "自定义内容\n", "utf8");
+    await buttonIn("刷新").onclick();
+    assert.equal(removeButton("自定义").length, 1);
+
+    for (let i = 0; i < 6; i++) {
+        buttonIn("添加目标").onclick();
+        assert.ok(choices.length > 0);
+        await choices[0].action();
+    }
+    assert.equal(buttonIn("添加目标").disabled, true);
+    assert.equal(removeButton("自定义").length, 1);
+
+    await plugin.closeWorkspace();
+});
+
+test("技能管理可在页面内弹窗维护用户级与项目级分发目标并校验输入", async (t) => {
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-skills-targets-modal-"));
+    t.after(() => fs.rmSync(fixtureDir, { recursive: true, force: true }));
+
+    const vaultRoot = path.join(fixtureDir, "vault");
+    const syncDir = path.join(vaultRoot, ".obsidian", "plugins", "agents-manager", "sync");
+    const homeDir = path.join(fixtureDir, "home");
+    const userSkillsRoot = path.join(homeDir, ".agents", "skills");
+    const otherProjRoot = path.join(fixtureDir, "other-proj");
+
+    const write = (file, content) => {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, content, "utf8");
+    };
+    write(path.join(userSkillsRoot, "demo-skill", "SKILL.md"), "---\nname: demo-skill\ndescription: 示例\n---\n");
+    write(path.join(vaultRoot, ".agents", "skills", "vault-skill", "SKILL.md"), "---\nname: vault-skill\ndescription: 仓库技能\n---\n");
+    write(path.join(otherProjRoot, "AGENTS.md"), "# 规范\n规则\n# 项目\n其他\n");
+    write(path.join(otherProjRoot, ".agents", "skills", "other-skill", "SKILL.md"), "---\nname: other-skill\ndescription: 其他\n---\n");
+    write(path.join(syncDir, "instruction-projects.json"), JSON.stringify({
+        version: 1,
+        projects: [{ name: "其他项目", type: "work", path: path.join(otherProjRoot, "AGENTS.md") }],
+    }));
+
+    const saved = [];
+    const notices = [];
+    const plugin = await loadPlugin({
+        workspace: { getActiveFile: () => null, getLeavesOfType: () => [] },
+        vault: { adapter: { getBasePath: () => vaultRoot }, getName: () => "当前仓库" },
+    }, {
+        fixtureDir,
+        notices,
+        save: value => saved.push(value),
+    });
+
+    const skillsHost = () => plugin.body.children[0].children[0].children[1].children[1];
+    const currentModal = () => plugin.body.children.at(-1);
+    const sButton = (label, index = 0) => {
+        for (const modal of plugin.body.children.slice(1).reverse()) {
+            const hit = findElements(modal, node => node.tag === "button" && node.textContent === label);
+            if (hit.length) return hit[index] || hit[0];
+        }
+        const hit = findElements(skillsHost(), node => node.tag === "button" && node.textContent === label);
+        assert.ok(hit.length > index, label);
+        return hit[index];
+    };
+    const modalFields = (label) => findElements(currentModal(), node => node.getAttribute("aria-label") === label);
+
+    await plugin.invoke("manage-skills");
+
+    // 1. 用户级管理分发目标：校验相对路径与重复工具名，成功后刷新，清空后展示新空态提示
+    sButton("管理分发目标").onclick();
+    assert.ok(findElements(currentModal(), n => n.textContent?.includes("管理用户级技能分发目标")).length > 0);
+    sButton("添加目标").onclick();
+    modalFields("工具名称")[2].value = "Claude";
+    modalFields("技能目录")[2].value = "~/dup-claude";
+    await sButton("保存").onclick();
+    assert.equal(saved.length, 0);
+    assert.equal(modalFields("工具名称")[2].getAttribute("aria-invalid"), "true");
+
+    modalFields("工具名称")[2].value = "CustomTool";
+    modalFields("技能目录")[2].value = "relative/path";
+    await sButton("保存").onclick();
+    assert.equal(saved.length, 0);
+    assert.equal(modalFields("技能目录")[2].getAttribute("aria-invalid"), "true");
+
+    modalFields("技能目录")[2].value = "~/custom-skills";
+    await sButton("保存").onclick();
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].skillUserTargets.CustomTool, "~/custom-skills");
+    assert.equal(notices.at(-1), "已更新用户级技能分发目标。");
+    assert.ok(findElements(skillsHost(), n => n.textContent?.includes("CustomTool")).length > 0);
+
+    // 清空用户级目标
+    sButton("管理分发目标").onclick();
+    while (modalFields("工具名称").length) sButton("移除").onclick();
+    await sButton("保存").onclick();
+    assert.deepEqual({ ...saved.at(-1).skillUserTargets }, {});
+    assert.ok(findElements(skillsHost(), n => n.textContent?.includes("尚未配置分发目标，可点击上方「管理分发目标」添加。")).length > 0);
+
+    // 2. 项目级管理分发目标：标明对所有项目生效、拒绝 .agents/skills、保存后对所有项目共同生效
+    sButton("当前仓库（1）").onclick();
+    sButton("管理分发目标", 1).onclick();
+    assert.ok(findElements(currentModal(), n => n.textContent?.includes("管理项目级技能分发目标（对所有项目生效）")).length > 0);
+    modalFields("相对技能目录")[0].value = ".agents/skills";
+    await sButton("保存").onclick();
+    assert.equal(saved.length, 2);
+    assert.equal(modalFields("相对技能目录")[0].getAttribute("aria-invalid"), "true");
+
+    modalFields("相对技能目录")[0].value = ".claude/skills";
+    sButton("添加目标").onclick();
+    modalFields("工具名称")[1].value = "Cursor";
+    modalFields("相对技能目录")[1].value = ".cursor/skills";
+    await sButton("保存").onclick();
+    assert.equal(saved.length, 3);
+    assert.equal(saved[2].skillProjectTargets.Cursor, ".cursor/skills");
+    assert.equal(notices.at(-1), "已更新项目级技能分发目标（对所有项目生效）。");
+
+    // 切换到「其他项目」也已出现 Cursor 分发目标
+    sButton("其他项目（1）").onclick();
+    assert.ok(findElements(skillsHost(), n => n.textContent?.includes(".cursor")).length > 0);
+
+    await plugin.closeWorkspace();
 });
 
 test("技能管理支持工作区切换、检查、自建编辑、逐个分发、整目录转换及 GitHub 更新与撤销", async (t) => {
