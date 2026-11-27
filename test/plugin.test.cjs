@@ -1600,6 +1600,7 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     // 点击「更新」直接更新（无安全确认弹窗）
     await sButton("更新").onclick();
     assert.notEqual(sButton("更新").className, "mod-cta");
+    assert.equal(sButton("更新").disabled, true);
     assert.match(read(path.join(userSkillsRoot, "gog", "SKILL.md")), /新版 Google CLI/);
     assert.deepEqual(fs.readFileSync(path.join(userSkillsRoot, "gog", "assets", "icon.bin")), binaryBytes);
     assert.equal(fs.existsSync(path.join(userSkillsRoot, "gog", ".github")), false);
@@ -1617,6 +1618,7 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     const restoredSources = JSON.parse(read(path.join(syncDir, "skills-sources.json")));
     assert.equal(restoredSources.skills["user/gog"].commit, "1111111111111111111111111111111111111111");
     assert.equal(sButton("更新").className, "mod-cta");
+    assert.equal(sButton("更新").disabled, false);
 
     await plugin.closeWorkspace();
     assert.equal(plugin.body.children.length, 0);
@@ -1659,11 +1661,15 @@ test("技能更新先显示列表，打开时按来源复用一天的结果，�
     assert.equal(requests, 1);
     assert.deepEqual(colors(), [false, false, false]);
     assert.ok(!plugin.plugin.skillsBusy);
+    const updateBeforeCheck = buttons("更新")[1].onclick();
     const firstCheck = buttons("检查更新")[0].onclick();
     assert.equal(requests, 1);
     success();
-    await firstCheck;
+    await Promise.all([firstCheck, updateBeforeCheck]);
     assert.deepEqual(colors(), [true, false, false]);
+    assert.deepEqual(buttons("更新").map(button => button.disabled), [false, true, false]);
+    await buttons("更新")[1].onclick();
+    assert.equal(requests, 1);
     assert.equal(localStorage.size, 1);
 
     await plugin.closeWorkspace();

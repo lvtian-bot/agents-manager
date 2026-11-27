@@ -770,10 +770,12 @@ function mountSkills(plugin, host) {
             const updateBtn = el("button", SKILL_ACTION_STYLE, "更新");
             const updateInfo = el("div", "max-width:30ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;");
             info.appendChild(updateInfo);
+            let updating = false;
             const updateStatus = () => {
                 const result = checks.status(skill.source);
                 const available = result?.status === "update-available";
                 updateBtn.className = available ? "mod-cta" : "";
+                updateBtn.disabled = updating || result?.status === "up-to-date";
                 updateInfo.textContent = updateInfo.title = formatCheckStatus(result);
                 updateInfo.hidden = !updateInfo.textContent;
                 updateInfo.style.color = available ? "var(--text-accent)" : "var(--text-muted)";
@@ -781,15 +783,18 @@ function mountSkills(plugin, host) {
             updateStatus();
             updateRows.push(updateStatus);
             updateBtn.onclick = async () => {
+                if (updateBtn.disabled) return;
+                updating = true;
                 updateBtn.disabled = true;
                 try {
                     const res = await exclusive(() => updateGitHubSkill(history, stateRoot, skill, plugin.settings, checks));
-                    new Notice("已更新 " + skill.name + "（" + res.latestCommit.slice(0, 7) + "）");
+                    if (res) new Notice("已更新 " + skill.name + "（" + res.latestCommit.slice(0, 7) + "）");
                     await safeRefresh();
                 } catch (error) {
-                    updateStatus();
-                    updateBtn.disabled = false;
                     await showMessage("更新失败", error.message || String(error));
+                } finally {
+                    updating = false;
+                    updateStatus();
                 }
             };
             actions.appendChild(updateBtn);

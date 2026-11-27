@@ -176,6 +176,11 @@ async function fetchLatestRevision(url, settings) {
 
 const CHECK_MAX_AGE = 24 * 60 * 60 * 1000;
 
+function revisionStatus(commit, latestCommit) {
+    if (typeof commit !== "string" || !/^[0-9a-f]{7,40}$/i.test(commit)) return "unknown-baseline";
+    return latestCommit.toLowerCase().startsWith(commit.toLowerCase()) ? "up-to-date" : "update-available";
+}
+
 function createUpdateChecks(app) {
     const results = new Map();
     const pending = new Map();
@@ -188,12 +193,7 @@ function createUpdateChecks(app) {
         if (typeof entry?.latestCommit !== "string" || !entry.latestCommit) return null;
         const age = Date.now() - entry?.checkedAt;
         if (!Number.isFinite(age) || age < 0 || age >= CHECK_MAX_AGE) return null;
-        let status = "unknown-baseline";
-        if (typeof source.commit === "string" && /^[0-9a-f]{7,40}$/i.test(source.commit)) {
-            const matches = entry.latestCommit.toLowerCase().startsWith(source.commit.toLowerCase());
-            status = matches ? "up-to-date" : "update-available";
-        }
-        return { ...entry, status };
+        return { ...entry, status: revisionStatus(source.commit, entry.latestCommit) };
     }
 
     function fetchLatest(url, settings) {
@@ -299,20 +299,21 @@ async function downloadEntries(parsed, targetSha, entries, settings) {
     return files;
 }
 
-async function downloadGitHubSkill(source, settings, checks) {
-    const check = await checks.fetchLatest(source.url, settings);
+async function downloadGitHubSkill(url, check, settings) {
     const entries = await listTreeEntries(check.parsed, check.latestCommit, settings);
     const files = await downloadEntries(check.parsed, check.latestCommit, entries, settings);
     return { files, parsed: check.parsed, source: {
         kind: "github",
-        url: source.url,
+        url,
         commit: check.latestCommit,
         updatedAt: new Date().toISOString(),
     } };
 }
 
 async function updateGitHubSkill(history, stateRoot, skill, settings, checks) {
-    const { files, source } = await downloadGitHubSkill(skill.source, settings, checks);
+    const check = await checks.fetchLatest(skill.source.url, settings);
+    if (revisionStatus(skill.source.commit, check.latestCommit) === "up-to-date") return null;
+    const { files, source } = await downloadGitHubSkill(skill.source.url, check, settings);
     await history.apply({
         type: "github-update",
         label: "更新 " + skill.name + "（" + source.commit.slice(0, 7) + "）",
@@ -326,7 +327,8 @@ async function updateGitHubSkill(history, stateRoot, skill, settings, checks) {
 }
 
 async function importGitHubSkill(history, stateRoot, scope, url, settings, checks) {
-    const { files, parsed, source } = await downloadGitHubSkill({ url }, settings, checks);
+    const check = await checks.fetchLatest(url, settings);
+    const { files, parsed, source } = await downloadGitHubSkill(url, check, settings);
     const md = files.find(file => file.rel === "SKILL.md");
     const frontmatter = parseSkillFrontmatter(Buffer.from(md.base64, "base64").toString("utf8"));
     const fallback = parsed.subpath.split("/").at(-1) || parsed.repo;
