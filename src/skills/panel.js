@@ -38,10 +38,9 @@ const SKILL_CELL_STYLE =
 const SKILL_ACTION_STYLE =
     "font-size:var(--am-font-control);padding:3px 7px;min-height:28px;height:auto;white-space:nowrap;";
 const SKILL_NAME_MIN_WIDTH = 188;
-const SKILL_UPDATE_WIDTH = 64;
 const SKILL_TYPE_WIDTH = 94;
 const SKILL_ACTION_WIDTH = 48;
-const SKILL_HARNESS_WIDTH = 120;
+const SKILL_HARNESS_WIDTH = 76;
 const TRUNCATE_STYLE = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
 
 function el(tag, cssText, textContent) {
@@ -697,6 +696,10 @@ function mountSkills(plugin, host) {
         const row = el("tr");
         const info = el("th", SKILL_CELL_STYLE + "text-align:left;font-weight:400;");
         info.setAttribute("scope", "row");
+        const infoLine = el("div", "display:flex;align-items:center;gap:8px;");
+        const infoText = el("div", "flex:1;min-width:0;");
+        infoLine.appendChild(infoText);
+        info.appendChild(infoLine);
         const titleLine = el("div", "display:flex;align-items:baseline;gap:8px;line-height:1.5;");
         const name = el("button", TRUNCATE_STYLE +
             "display:block;text-align:left;padding:0;height:auto;min-height:0;border:0;box-shadow:none;" +
@@ -706,7 +709,7 @@ function mountSkills(plugin, host) {
         name.title = skill.name;
         name.onclick = () => openViewSkillModal(skill);
         titleLine.appendChild(name);
-        info.appendChild(titleLine);
+        infoText.appendChild(titleLine);
 
         const descriptionLine = el("div",
             "display:flex;align-items:baseline;gap:8px;line-height:1.5;font-size:var(--am-font-secondary);");
@@ -714,7 +717,7 @@ function mountSkills(plugin, host) {
         const description = el("span", TRUNCATE_STYLE + "color:var(--text-muted);", summary);
         description.title = summary;
         descriptionLine.appendChild(description);
-        info.appendChild(descriptionLine);
+        infoText.appendChild(descriptionLine);
 
         if (skill.issues.length) {
             const warning = el("button",
@@ -734,17 +737,16 @@ function mountSkills(plugin, host) {
                 arrow.style.transform = issues.hidden ? "" : "rotate(90deg)";
             };
             titleLine.appendChild(warning);
-            info.appendChild(issues);
+            infoText.appendChild(issues);
         }
         row.appendChild(info);
 
-        const updateCell = el("td", SKILL_CELL_STYLE + "text-align:right;");
-        row.appendChild(updateCell);
         const isGitHub = skill.source.kind === "github";
-        if (isGitHub) renderGitHubUpdate(updateCell, descriptionLine, skill);
+        if (isGitHub) renderGitHubUpdate(infoLine, descriptionLine, skill);
 
         const typeCell = el("td", SKILL_CELL_STYLE);
         const typeSelect = skillTypeSelect("类型", skill.source.kind);
+        typeSelect.style.fontSize = "var(--font-ui-small,13px)";
         typeSelect.style.maxWidth = "100%";
         typeSelect.title = skill.name;
         typeSelect.onchange = () => changeSkillType(typeSelect, skill);
@@ -767,7 +769,7 @@ function mountSkills(plugin, host) {
         if (scope.harnessStates.length) {
             for (const hState of scope.harnessStates) {
                 const cell = el("td", SKILL_CELL_STYLE);
-                const line = el("div", "display:flex;align-items:center;justify-content:flex-end;gap:4px;flex-wrap:wrap;text-align:right;");
+                const line = el("div", "display:flex;align-items:center;justify-content:center;gap:4px;flex-wrap:wrap;text-align:center;");
                 cell.appendChild(line);
                 if (hState.status === "whole-dir-linked") {
                     const status = el("span", "color:var(--text-muted);", "整目录已链接");
@@ -811,8 +813,8 @@ function mountSkills(plugin, host) {
         parent.appendChild(row);
     }
 
-    function renderGitHubUpdate(cell, descriptionLine, skill) {
-        const updateBtn = el("button", SKILL_ACTION_STYLE, "更新");
+    function renderGitHubUpdate(infoLine, descriptionLine, skill) {
+        const updateBtn = el("button", SKILL_ACTION_STYLE + "flex-shrink:0;", "更新");
         updateBtn.type = "button";
         updateBtn.className = "mod-cta";
         const updateInfo = el("span", TRUNCATE_STYLE + "max-width:55%;flex-shrink:0;");
@@ -821,7 +823,7 @@ function mountSkills(plugin, host) {
         const updateStatus = () => {
             const result = checks.status(skill.source);
             const available = result?.status === "update-available";
-            if (available && !updateBtn.parentElement) cell.appendChild(updateBtn);
+            if (available && !updateBtn.parentElement) infoLine.appendChild(updateBtn);
             if (!available && updateBtn.parentElement) updateBtn.remove();
             updateInfo.textContent = updateInfo.title = formatCheckStatus(result);
             updateInfo.hidden = !updateInfo.textContent;
@@ -852,12 +854,10 @@ function mountSkills(plugin, host) {
         const scroll = el("div", "overflow-x:auto;max-width:100%;");
         scroll.tabIndex = 0;
         scroll.setAttribute("aria-label", "技能");
-        const minWidth = SKILL_NAME_MIN_WIDTH + SKILL_UPDATE_WIDTH + SKILL_TYPE_WIDTH + SKILL_ACTION_WIDTH +
-            harnessColumns * SKILL_HARNESS_WIDTH;
+        const minWidth = SKILL_NAME_MIN_WIDTH + SKILL_TYPE_WIDTH + SKILL_ACTION_WIDTH + harnessColumns * SKILL_HARNESS_WIDTH;
         const table = el("table", "width:100%;border-collapse:collapse;table-layout:fixed;margin:0;min-width:" + minWidth + "px;");
         const colgroup = el("colgroup");
         colgroup.appendChild(el("col"));
-        colgroup.appendChild(el("col", "width:" + SKILL_UPDATE_WIDTH + "px;"));
         colgroup.appendChild(el("col", "width:" + SKILL_TYPE_WIDTH + "px;"));
         colgroup.appendChild(el("col", "width:" + SKILL_ACTION_WIDTH + "px;"));
         if (harnessColumns) {
@@ -877,11 +877,10 @@ function mountSkills(plugin, host) {
         };
         const emptyHarnessColumns = harnessColumns - scope.harnessStates.length;
         appendHeader("技能", "left");
-        appendEmptyCells(columns, 1, "th");
         appendHeader("类型", "left");
         appendHeader("操作", "center");
         appendEmptyCells(columns, emptyHarnessColumns, "th");
-        for (const tool of scope.harnessStates) appendHeader(tool.name, "right");
+        for (const tool of scope.harnessStates) appendHeader(tool.name, "center");
         head.appendChild(columns);
         table.appendChild(head);
         const body = el("tbody");
