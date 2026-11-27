@@ -10,10 +10,10 @@ const SECTION_DEFS = [
 ];
 
 const NAV_BASE_STYLE =
-    "padding:7px 14px;border-radius:6px;cursor:pointer;font-size:13px;box-shadow:none;" +
+    "padding:7px 14px;border-radius:6px;cursor:pointer;font-size:var(--am-font-control);box-shadow:none;" +
     "background:transparent;border:1px solid transparent;color:var(--text-muted);";
 const NAV_ACTIVE_STYLE =
-    "padding:7px 14px;border-radius:6px;cursor:pointer;font-size:13px;box-shadow:none;" +
+    "padding:7px 14px;border-radius:6px;cursor:pointer;font-size:var(--am-font-control);box-shadow:none;" +
     "background:var(--background-secondary);border:1px solid var(--background-modifier-border);" +
     "color:var(--text-normal);font-weight:600;";
 
@@ -72,7 +72,10 @@ class ManagerWorkspaceView extends ItemView {
     async onOpen() {
         const root = this.contentEl;
         root.empty?.();
-        root.style.cssText = "display:flex;flex-direction:column;height:100%;box-sizing:border-box;overflow:hidden;padding:0;";
+        root.style.cssText =
+            "display:flex;flex-direction:column;height:100%;box-sizing:border-box;overflow:hidden;padding:0;" +
+            "--am-font-primary:var(--font-ui-medium,15px);--am-font-control:calc(var(--font-ui-small,13px) + 1px);" +
+            "--am-font-secondary:var(--font-ui-smaller,12px);font-size:var(--am-font-primary);line-height:1.5;";
 
         const nav = document.createElement("div");
         nav.setAttribute("role", "tablist");

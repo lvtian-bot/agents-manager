@@ -22,7 +22,8 @@ const legacySources = {
     codeSource: "8-永久笔记/人工智能/37.2-Code项目指令模板.md",
 };
 function loadSettings(app, data, pluginDir) {
-    const saved = data || {};
+    const saved = { ...data };
+    delete saved.githubCredentialVariable;
     const adapter = app.vault?.adapter;
     const root = adapter?.getBasePath?.() || adapter?.basePath;
     const config = root && path.join(root, app.vault.configDir || ".obsidian");
@@ -38,7 +39,6 @@ function loadSettings(app, data, pluginDir) {
         userSource: "", workSource: "", codeSource: "",
         ...(existing ? legacySources : {}),
         targets: existing ? { ...harnessTargets } : {},
-        githubCredentialVariable: "",
         ...saved,
         skillUserTargets: saved.skillUserTargets ? { ...saved.skillUserTargets } : { ...defaultSkillUserTargets },
         skillProjectTargets: saved.skillProjectTargets ? { ...saved.skillProjectTargets } : { ...defaultSkillProjectTargets },
@@ -98,11 +98,12 @@ class NotePicker extends FuzzySuggestModal {
     onClose() { super.onClose(); this.plugin.modals.delete(this); }
 }
 
-function disclosure(parent, title) {
-    const group = parent.createEl("details");
-    const summary = group.createEl("summary", { text: title });
-    summary.style.cssText = "cursor:pointer;padding:0.65em 0;font-weight:var(--font-semibold)";
-    return group;
+function settingsSection(parent, title) {
+    const section = parent.createEl("section");
+    section.style.marginBlockEnd = "1.5em";
+    const heading = section.createEl("h3", { text: title });
+    heading.style.marginBlock = "0 0.65em";
+    return section;
 }
 
 function textInput(parent, label, value) {
@@ -154,8 +155,6 @@ class ManagerSettings extends PluginSettingTab {
                 errorEl.style.color = "var(--text-error)";
                 invalidInput = input;
                 input.setAttribute("aria-invalid", "true");
-                const group = input.closest("details");
-                if (group) group.open = true;
                 input.focus();
                 throw error;
             }
@@ -210,19 +209,15 @@ class ManagerSettings extends PluginSettingTab {
             });
         }
 
-        container.createEl("h3", { text: "技能管理" });
-        const githubGroup = disclosure(container, "GitHub 更新凭据");
-        field(githubGroup, "githubCredentialVariable", "GitHub 凭据环境变量名", "可选，留空时匿名访问 GitHub API（每小时限 60 次）。只填写变量名。", envVariableName);
-
-        container.createEl("h3", { text: "AI 总结笔记" });
-        const setting = new Setting(container).setName("总结模式");
+        const summary = settingsSection(container, "AI 总结笔记");
+        const setting = new Setting(summary).setName("总结模式");
         const mode = setting.controlEl.createEl("select", { attr: { "aria-label": "总结模式" } });
         mode.createEl("option", { text: "单提示词模式" }).value = "single";
         mode.createEl("option", { text: "多提示词模式" }).value = "multiple";
         mode.value = plugin.settings.summaryMode;
         readers.set("summaryMode", () => mode.value);
-        const single = container.createDiv();
-        const multiple = container.createDiv();
+        const single = summary.createDiv();
+        const multiple = summary.createDiv();
         field(single, "singleTemplate", "总结提示词", "留空使用内置提示词。模板可以用 {activeNote} 引用笔记。", vaultPath);
         field(multiple, "typeProperty", "匹配属性", "", required);
         mapping(multiple, "templates", "提示词匹配规则", "属性值", "提示词笔记", "添加规则", vaultPath);
@@ -234,7 +229,7 @@ class ManagerSettings extends PluginSettingTab {
         }
         mode.onchange = showMode;
         showMode();
-        const model = disclosure(container, "模型连接");
+        const model = settingsSection(container, "模型连接");
         function validateConnectionField(validate) {
             return value => connectionInputs.some(input => input.value.trim()) ? validate(value) : "";
         }
