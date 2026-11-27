@@ -13,8 +13,8 @@
 
 ## 安装
 
-1. 从 [GitHub Releases](https://github.com/lvtian-bot/agents-manager/releases) 下载同一版本的 `main.js` 和 `manifest.json`。
-2. 在知识库的 Obsidian 配置目录下创建 `plugins/agents-manager/`，放入这两个文件。配置目录默认为 `.obsidian`。
+1. 在 [GitHub Releases](https://github.com/lvtian-bot/obsidian-agents-manager/releases) 打开所需版本，展开「Assets」，下载 `main.js` 和 `manifest.json`。
+2. 在知识库根目录下创建 `.obsidian/plugins/agents-manager/`，放入这两个文件。如果知识库使用自定义配置目录，把路径里的 `.obsidian` 换成该目录名称。
 3. 重新打开 Obsidian，在「设置 → 第三方插件」启用「Agents Manager」。在「指令同步」的用户级、Work 和 Code 标签页选择对应的源笔记或模板，并在「指令同步」「技能管理」面板中添加需要分发的 Harness 目标。
 4. 使用 AI 总结或翻译时，在「模型设置」选择「DeepSeek 官方」「硅基流动」或「自定义连接」。自定义连接需要填写兼容 Chat Completions 的完整接口地址和模型名称。填入对应的 API Key 并点击旁边的「保存」。只使用指令同步或技能管理时，可以留空。
 
