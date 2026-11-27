@@ -1803,14 +1803,13 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.match(userTable.style.cssText, /table-layout:fixed/);
     assert.equal(userTable.style.cssText, projectTable.style.cssText);
     const projectHeaders = findElements(projectTable, n => n.tag === "thead")[0].children[0].children;
-    assert.equal(projectHeaders[1].getAttribute("aria-hidden"), "true");
-    assert.equal(projectHeaders[4].getAttribute("aria-hidden"), "true");
-    assert.equal(projectHeaders[4].colSpan, 1);
-    assert.equal(projectHeaders[5].textContent, "Claude");
-    assert.match(projectHeaders[5].style.cssText, /text-align:right/);
+    assert.deepEqual(projectHeaders.map(header => header.textContent), ["技能", "类型", "操作", "", "Claude"]);
+    assert.equal(projectHeaders[3].getAttribute("aria-hidden"), "true");
+    assert.equal(projectHeaders[3].colSpan, 1);
+    assert.match(projectHeaders[4].style.cssText, /text-align:center/);
     const projectRow = findElements(projectTable, n => n.tag === "tbody")[0].children[0];
-    assert.equal(projectRow.children[4].getAttribute("aria-hidden"), "true");
-    assert.match(projectRow.children[5].children[0].style.cssText, /justify-content:flex-end/);
+    assert.equal(projectRow.children[3].getAttribute("aria-hidden"), "true");
+    assert.match(projectRow.children[4].children[0].style.cssText, /justify-content:center/);
     sButton("项目A（1）").onclick();
     assert.equal(userTable.parent.parent.style.display, "none");
     assert.equal(projectTable.parent.parent.style.display, "");
@@ -1828,7 +1827,7 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     readingModal.close();
     assert.equal(preview.component.loaded, false);
     const alphaRow = sButton("alpha-skill").closest("tr");
-    const editButton = alphaRow.children[3].children[0];
+    const editButton = alphaRow.children[2].children[0];
     assert.equal(editButton.getAttribute("data-icon"), "pencil");
     assert.equal(editButton.getAttribute("aria-label"), "编辑");
     editButton.onclick();
@@ -1956,21 +1955,26 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     sButton("取消").onclick();
     assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "设置来源").length, 0);
     const gogRow = typeFor("gog").parent.parent;
-    assert.equal(gogRow.children.length, 6);
-    assert.equal(gogRow.children[1].children.length, 0);
-    assert.equal(typeFor("gog").parent, gogRow.children[2]);
-    assert.deepEqual(gogRow.children[3].children, [sourceButton]);
-    assert.equal(linkSwitch("gog", "CustomTool").closest("td"), gogRow.children[5]);
+    const [infoCell, typeCell, actionCell] = gogRow.children;
+    const [infoLine] = infoCell.children;
+    assert.equal(gogRow.children.length, 5);
+    assert.match(infoLine.style.cssText, /display:flex/);
+    assert.equal(infoLine.children.length, 1);
+    assert.equal(typeFor("gog").parent, typeCell);
+    assert.equal(typeFor("gog").style.fontSize, "var(--font-ui-small,13px)");
+    assert.deepEqual(actionCell.children, [sourceButton]);
+    assert.equal(linkSwitch("gog", "CustomTool").closest("td"), gogRow.children[4]);
 
     await sButton("检查更新").onclick();
     assert.ok(skillsTextIncludes("发现新版本：2222222").length > 0);
     assert.equal(sButton("更新").className, "mod-cta");
-    assert.deepEqual(gogRow.children[1].children, [sButton("更新")]);
-    assert.deepEqual(gogRow.children[3].children, [sourceButton]);
+    assert.equal(infoLine.children[1], sButton("更新"));
+    assert.equal(gogRow.children.length, 5);
+    assert.deepEqual(actionCell.children, [sourceButton]);
 
     // 点击「更新」直接更新（无安全确认弹窗）
     await sButton("更新").onclick();
-    assert.equal(typeFor("gog").closest("tr").children[1].children.length, 0);
+    assert.equal(typeFor("gog").closest("tr").children[0].children[0].children.length, 1);
     assert.match(read(path.join(userSkillsRoot, "gog", "SKILL.md")), /新版 Google CLI/);
     assert.deepEqual(fs.readFileSync(path.join(userSkillsRoot, "gog", "assets", "icon.bin")), binaryBytes);
     assert.equal(fs.existsSync(path.join(userSkillsRoot, "gog", ".github")), false);
@@ -2026,7 +2030,7 @@ test("技能更新先显示列表，打开时按来源复用一天的结果，�
     const tick = () => new Promise(resolve => setImmediate(resolve));
     let plugin = await startup();
     const buttons = label => findElements(plugin.body, node => node.tag === "button" && node.textContent === label);
-    const updateSkills = () => buttons("更新").map(button => button.closest("tr").children[0].children[0].children[0].textContent);
+    const updateSkills = () => buttons("更新").map(button => button.closest("tr").children[1].children[0].title);
     await plugin.invoke("manage-skills");
     assert.equal(requests, 1);
     assert.deepEqual(updateSkills(), []);
