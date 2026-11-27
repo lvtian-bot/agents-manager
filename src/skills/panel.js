@@ -1,5 +1,5 @@
 const fs = require("fs");
-const { Menu, Notice, ToggleComponent } = require("obsidian");
+const { Menu, Notice, setIcon, ToggleComponent } = require("obsidian");
 const { createWorkspaceFooter } = require("../workspace-footer");
 const { readText, replaceText } = require("../instructions/storage");
 const { skillUserPath, skillProjectPath, required } = require("../settings");
@@ -38,8 +38,8 @@ const SKILL_CELL_STYLE =
 const SKILL_ACTION_STYLE =
     "font-size:var(--am-font-control);padding:3px 7px;min-height:28px;height:auto;white-space:nowrap;";
 const SKILL_NAME_MIN_WIDTH = 188;
-const SKILL_TYPE_WIDTH = 88;
-const SKILL_ACTION_WIDTH = 180;
+const SKILL_TYPE_WIDTH = 116;
+const SKILL_ACTION_WIDTH = 152;
 const SKILL_HARNESS_WIDTH = 120;
 const TRUNCATE_STYLE = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
 
@@ -833,7 +833,12 @@ function mountSkills(plugin, host) {
                 }
             };
             actions.appendChild(updateBtn);
-            const sourceBtn = el("button", SKILL_ACTION_STYLE, "修改链接");
+            const sourceBtn = el("button", SKILL_ACTION_STYLE +
+                "display:inline-flex;align-items:center;justify-content:center;width:28px;padding:0;--icon-size:14px;");
+            sourceBtn.type = "button";
+            sourceBtn.title = "修改链接";
+            sourceBtn.setAttribute("aria-label", sourceBtn.title);
+            setIcon(sourceBtn, "pencil");
             sourceBtn.onclick = () => openGitHubLinkModal(skill);
             actions.appendChild(sourceBtn);
         }

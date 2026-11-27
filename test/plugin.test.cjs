@@ -1733,7 +1733,15 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.equal(typeFor("gog").value, "github");
     assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "编辑").length, 4);
     assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "查看").length, 5);
-    assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "修改链接").length, 1);
+    const sourceButtons = findElements(skillsHost, node => node.tag === "button" && node.getAttribute("aria-label") === "修改链接");
+    assert.equal(sourceButtons.length, 1);
+    const [sourceButton] = sourceButtons;
+    assert.equal(sourceButton.textContent, "");
+    assert.equal(sourceButton.getAttribute("data-icon"), "pencil");
+    assert.equal(sourceButton.title, "修改链接");
+    sourceButton.onclick();
+    assert.ok(findElements(plugin.body, node => node.tag === "h2" && node.textContent === "修改链接").length > 0);
+    sButton("取消").onclick();
     assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "设置来源").length, 0);
     const gogRow = typeFor("gog").parent.parent;
     assert.equal(gogRow.children.length, 5);
