@@ -650,7 +650,7 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
         return item;
     };
     await plugin.invoke("sync-instructions");
-    button("行级对比合并…").onclick();
+    button("逐行\n合并").onclick();
     const checkboxes = findElements(plugin.body, node => node.type === "checkbox");
     assert.equal(checkboxes.length, 2);
     for (const box of checkboxes) { box.checked = true; box.onchange(); }
@@ -681,7 +681,7 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
     const sourceBeforeFailure = read(typeSource);
     const targetBeforeFailure = read(target);
     const baselineBeforeFailure = read(typeStatePath);
-    const recover = button("用项目版本回收进模板");
+    const recover = button("回收\n项目改动");
     failSourceWrite = true;
     await recover.onclick();
     assert.equal(read(typeSource), sourceBeforeFailure);
@@ -716,7 +716,7 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
     assert.equal(button("撤销上次操作").disabled, true);
     await plugin.closeWorkspace();
 
-    // One preview and one undo for an existing Work project, a new Code project and user targets.
+    // 三页都有待办，分别确认每页的写入范围。
     const codeTarget = path.join(fixtureDir, "code-project", "AGENTS.md");
     const codeSource = "# Code 规范\n代码规则\n# 项目模板\n代码示例\n";
     write(path.join(noteFolder, "37.2-Code项目指令模板.md"), codeSource);
@@ -728,22 +728,28 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
     const previousTarget = read(target);
 
     await plugin.invoke("sync-instructions");
-    const cancelBatch = button("一键分发").onclick();
+    button("第二级：Work 类型（1 待处理）").onclick();
+    const cancelBatch = button("分发 Work 项目").onclick();
     await tick();
     button("取消").onclick();
     await cancelBatch;
     assert.equal(read(target), previousTarget);
     assert.equal(fs.existsSync(codeTarget), false);
-    const batch = button("一键分发").onclick();
+    const batch = button("分发 Work 项目").onclick();
     await tick();
+    const [summary] = findElements(plugin.body, node => node.textContent.startsWith("本次处理"));
+    assert.match(summary.textContent, /1 个 Work 项目/);
+    assert.doesNotMatch(summary.textContent, /Code|用户级|Codex/);
+    // 确认期间即使活动页变化，也只能执行已经预览过的 Work 批次。
+    button("第二级：Code 类型（1 待处理）").onclick();
     button("确认分发").onclick();
     await batch;
     await tick();
-    assert.equal(read(codeTarget), codeSource);
-    assert.equal(read(userTarget), userBody);
+    assert.equal(fs.existsSync(codeTarget), false);
+    assert.equal(read(userTarget), "本地用户指令\n");
     assert.ok(read(target).endsWith(projectBody));
     assert.notEqual(read(target), previousTarget);
-    assert.match(JSON.parse(read(journal)).label, /一键分发/);
+    assert.match(JSON.parse(read(journal)).label, /分发 Work 项目/);
     await button("撤销上次操作").onclick();
     await tick();
     assert.equal(read(target), previousTarget);
@@ -751,6 +757,32 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
     assert.equal(fs.existsSync(codeTarget), false);
     assert.equal(read(typeStatePath), previousBaseline);
     assert.equal(button("撤销上次操作").disabled, true);
+
+    // Work 模板缺失也不影响 Code 页分发。
+    fs.unlinkSync(typeSource);
+    const codeBatch = button("分发 Code 项目").onclick();
+    await tick();
+    assert.ok(findElements(plugin.body, node => node.textContent === "本次处理 1 个 Code 项目。").length);
+    button("确认分发").onclick();
+    await codeBatch;
+    assert.equal(read(codeTarget), codeSource);
+    assert.equal(read(target), previousTarget);
+    assert.equal(read(userTarget), "本地用户指令\n");
+    const codeBaseline = read(typeStatePath);
+
+    const userTab = findElements(plugin.body, node => node.tag === "button" && node.textContent.startsWith("第一级：用户级指令"))[0];
+    userTab.onclick();
+    const userBatch = button("分发用户级指令").onclick();
+    await tick();
+    button("确认分发").onclick();
+    await userBatch;
+    assert.equal(read(userTarget), userBody);
+    assert.equal(read(target), previousTarget);
+    assert.equal(read(codeTarget), codeSource);
+    assert.equal(read(typeStatePath), codeBaseline);
+    await button("撤销上次操作").onclick();
+    assert.equal(read(userTarget), "本地用户指令\n");
+    assert.equal(read(codeTarget), codeSource);
     await plugin.closeWorkspace();
 });
 
@@ -873,7 +905,7 @@ test("同步面板操作后原地刷新保留标签页与滚动位置，并支�
     };
 
     // 1. 回收项目A后，原地刷新，项目B立即可分发。
-    await button("用项目版本回收进模板").onclick();
+    await button("回收\n项目改动").onclick();
     assert.match(notices.at(-1), /已把项目工作规范回收进 Work 类型模板/);
     assertStayedInWorkTab("第二级：Work 类型（1 待处理）");
 
@@ -893,7 +925,7 @@ test("同步面板操作后原地刷新保留标签页与滚动位置，并支�
     const [conflictStatus] = findElements(plugin.body, node => node.textContent === "两边都有修改");
     const [remove, merge, recycle, overwrite] = findElements(conflictStatus.parent, node => node.tag === "button");
     assert.deepEqual([remove.textContent, merge.textContent, recycle.textContent, overwrite.textContent],
-        ["×", "行级对比合并…", "用项目版本回收进模板", "用模板覆盖此项目"]);
+        ["×", "逐行\n合并", "回收\n项目改动", "覆盖\n项目改动"]);
     assert.notEqual(remove.parent, merge.parent);
     assert.equal(merge.className, "mod-cta");
     assert.notEqual(recycle.className, "mod-cta");
@@ -901,7 +933,7 @@ test("同步面板操作后原地刷新保留标签页与滚动位置，并支�
     assert.ok(button("备份并分发"));
 
     // 4. 行级对比合并项目A写回后，主面板原地刷新且待处理计数准确降至 1。
-    button("行级对比合并…").onclick();
+    button("逐行\n合并").onclick();
     const checkboxes = findElements(plugin.body, node => node.type === "checkbox");
     assert.equal(checkboxes.length, 2);
     for (const box of checkboxes) { box.checked = true; box.onchange(); }
@@ -911,12 +943,12 @@ test("同步面板操作后原地刷新保留标签页与滚动位置，并支�
     assertStayedInWorkTab("第二级：Work 类型（1 待处理）");
 
     // 5. 一键分发与撤销均在原地刷新，不重建工作区标签页。
-    const batch = button("一键分发").onclick();
+    const batch = button("分发 Work 项目").onclick();
     await tick();
     button("确认分发").onclick();
     await batch;
     await tick();
-    assert.equal(fs.existsSync(userTarget), true);
+    assert.equal(fs.existsSync(userTarget), false);
     assertStayedInWorkTab("第二级：Work 类型");
 
     await button("撤销上次操作").onclick();

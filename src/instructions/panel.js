@@ -378,8 +378,8 @@ function mountInstructions(plugin, host) {
 
         channel.labels = {
             initialCreateButton: "创建并建立基线",
-            reviewDistribute: LABEL_BACKUP_AND_OVERWRITE,
             recycle: "用目标版本回收进 用户指令源笔记",
+            merge: "行级对比合并…",
             overwriteExisting: LABEL_BACKUP_AND_OVERWRITE,
             overwriteMissing: "用源正文重新创建"
         };
@@ -497,9 +497,9 @@ function mountInstructions(plugin, host) {
 
         channel.labels = {
             initialCreateButton: "从模板生成完整文件",
-            reviewDistribute: "用模板区块覆盖",
-            recycle: "用项目版本回收进模板",
-            overwriteExisting: "用模板覆盖此项目",
+            recycle: "回收\n项目改动",
+            overwriteExisting: "覆盖\n项目改动",
+            merge: "逐行\n合并",
             overwriteMissing: "用模板重新生成完整文件"
         };
 
@@ -1005,7 +1005,7 @@ function mountInstructions(plugin, host) {
         }
         var recycleButton = { label: spec.recycleLabel, primary: !spec.sourceChanged, run: spec.recycleRun };
         var overwriteButton = { label: spec.overwriteLabel, run: spec.overwriteRun };
-        var mergeButton = { label: "行级对比合并…", primary: !!spec.sourceChanged, openMerge: spec.openMerge };
+        var mergeButton = { label: spec.mergeLabel, primary: !!spec.sourceChanged, openMerge: spec.openMerge };
         return spec.sourceChanged
             ? [mergeButton, recycleButton, overwriteButton]
             : [recycleButton, overwriteButton, mergeButton];
@@ -1045,14 +1045,15 @@ function mountInstructions(plugin, host) {
             } else if (target.action === "record-only") {
                 buttons.push({ label: "建立同步基线", primary: true, run: distribute, afterSuccess: afterSuccess });
             } else if (target.action === "initial-review") {
-                buttons.push({ label: labels.reviewDistribute, primary: true, run: distribute, afterSuccess: afterSuccess });
+                buttons.push({ label: labels.overwriteExisting, primary: true, run: distribute, afterSuccess: afterSuccess });
                 buttons.push({ label: labels.recycle, run: recycle, afterSuccess: afterSuccess });
-                buttons.push({ label: "行级对比合并…", openMerge: openMerge, afterMerge: afterMerge });
+                buttons.push({ label: labels.merge, openMerge: openMerge, afterMerge: afterMerge });
             } else if (target.action === "conflict") {
                 buttons = buildConflictButtons({
                     fileExists: fileExists,
                     sourceChanged: target.sourceChangedSinceSync,
                     recycleLabel: labels.recycle,
+                    mergeLabel: labels.merge,
                     recycleRun: recycle,
                     overwriteLabel: fileExists ? labels.overwriteExisting : labels.overwriteMissing,
                     overwriteRun: distribute,
@@ -1367,6 +1368,12 @@ function mountInstructions(plugin, host) {
             var button = el("button",
                 "font-size:12px;padding:3px 7px;min-height:26px;height:auto;max-width:100%;white-space:normal;",
                 entry.label);
+            if (entry.label.includes("\n")) {
+                button.style.whiteSpace = "pre";
+                button.style.lineHeight = "1.25";
+                button.style.minWidth = "calc(4em + 16px)";
+                button.setAttribute("aria-label", entry.label.replace("\n", ""));
+            }
             if (entry.primary) {
                 button.className = "mod-cta";
             }
@@ -1414,42 +1421,57 @@ function mountInstructions(plugin, host) {
         content.appendChild(row);
     }
 
-    async function batchPlan() {
-        const registry = readRegistry();
-        const loaded = await loadTypeSources(app, registry);
-        const targets = buildTypePlans(registry.projects, loaded.sources, loaded.errors).targets;
-        const layer1Targets = getLayer1Targets();
-        if (layer1Targets.length) {
-            const source = USER_CHANNEL.extractSource(syncReadVault(app, getLayer1Source()));
-            targets.push(...buildChannelPlan(USER_CHANNEL, layer1Targets, source, null, readChannelState(USER_CHANNEL)).targets);
-        }
-        const sources = new Set(targets.map(t => canonicalPath(path.join(VAULT_ROOT, t.channel.sourceVaultPath))));
-        const seen = new Set();
-        for (const target of targets) {
-            if (target.action === "invalid") throw new Error(target.name + "：" + target.reason);
+    function batchPlan(channel) {
+        const userTargets = getLayer1Targets();
+        if (channel === USER_CHANNEL && !userTargets.length) return [];
+        const projects = readRegistry().projects;
+        const selected = channel === USER_CHANNEL
+            ? userTargets
+            : projects.filter(project => project.type === channel.id);
+        if (!selected.length) return [];
+
+        // 其他页只参与路径冲突检查，避免本页分发改写另一页的来源或目标。
+        const otherTargets = channel === USER_CHANNEL
+            ? projects
+            : userTargets.concat(projects.filter(project => project.type !== channel.id));
+        const seen = new Set(otherTargets.map(target => canonicalPath(target.path)));
+        const sources = new Set([USER_CHANNEL, ...Object.values(TYPE_CHANNELS)]
+            .map(item => item.sourceVaultPath)
+            .filter(Boolean)
+            .map(file => canonicalPath(path.join(VAULT_ROOT, file))));
+        for (const target of selected) {
             const key = canonicalPath(target.path);
             if (sources.has(key)) throw new Error("指令源同时被登记为分发目标：" + target.path);
             if (seen.has(key)) throw new Error("多个目标指向同一文件：" + target.path);
             seen.add(key);
         }
+        const source = channel.extractSource(syncReadVault(app, channel.sourceVaultPath));
+        const { targets } = buildChannelPlan(channel, selected, source, null, readChannelState(channel));
+        const invalid = targets.find(target => target.action === "invalid");
+        if (invalid) throw new Error(invalid.name + "：" + invalid.reason);
         return targets.filter(target => target.action !== "unchanged");
     }
 
-    async function distributeAll() {
-        const targets = await batchPlan();
-        if (!targets.length) { await showMessage("一键分发", "所有目标均已同步。"); return false; }
-        const users = targets.filter(target => target.channel.id === "user").length;
+    function batchLabel(channel) {
+        return channel === USER_CHANNEL ? "分发用户级指令" : "分发 " + TYPE_LABELS[channel.id] + " 项目";
+    }
+
+    async function distributePage(channel) {
+        const targets = batchPlan(channel);
+        const title = batchLabel(channel);
+        if (!targets.length) { await showMessage(title, "当前页没有待分发的目标。"); return false; }
         const conflicts = targets.filter(target => ["conflict", "initial-review"].includes(target.action));
-        const summary = "本次处理 " + users + " 个用户级目标和 " + (targets.length - users) + " 个项目。" +
-            "\n其中 " + conflicts.length + " 个目标有本地改动或首次比对存在差异，确认后使用源版本。" +
-            (conflicts.length ? "\n" + conflicts.map(target => target.name).join("、") : "");
-        if (!await showConfirm("一键分发", summary, "确认分发")) return false;
-        const fresh = await batchPlan();
-        const signature = list => JSON.stringify(list.map(t => [t.channel.id, t.sourceVaultPath, t.path, t.currentHash, t.action, t.source.fullBody]));
+        const targetKind = channel === USER_CHANNEL ? " 个用户级目标" : " 个 " + TYPE_LABELS[channel.id] + " 项目";
+        const summary = "本次处理 " + targets.length + targetKind + "。" +
+            (conflicts.length ? "\n其中 " + conflicts.length + " 个目标有本地改动或首次比对存在差异，确认后使用源版本。\n" +
+                conflicts.map(target => target.name).join("、") : "");
+        if (!await showConfirm(title, summary, "确认分发")) return false;
+        const fresh = batchPlan(channel);
+        const signature = list => JSON.stringify(list.map(t => [t.name, t.sourceVaultPath, t.path, t.currentHash, t.action, t.source.fullBody]));
         if (signature(fresh) !== signature(targets)) throw new Error("待分发内容已变化，请重新确认。");
         const changes = changeSet();
         for (const target of fresh) planDistribution(changes, target);
-        await changes.apply("一键分发（" + fresh.length + " 个目标）");
+        await changes.apply(title + "（" + fresh.length + " 个目标）");
         return true;
     }
 
@@ -1468,7 +1490,7 @@ function mountInstructions(plugin, host) {
 
     content.appendChild(el("div",
         "margin-bottom:14px;line-height:1.6;color:var(--text-muted);",
-        "可逐个处理，也可一键分发全部目标。第一级分发整份正文；" +
+        "可逐个处理，也可批量分发当前标签页的目标。第一级分发整份正文；" +
         "第二级只同步第 1 个「# 」一级标题到第 2 个之间的区块，第 2 个一级标题及其后内容永不改动。"));
 
     var TAB_BASE_STYLE =
@@ -1555,6 +1577,15 @@ function mountInstructions(plugin, host) {
         };
         var activateTab = function (key) {
             activeKey = key;
+            const selected = paneDefs.find(def => def.key === key);
+            const channel = selected.type ? TYPE_CHANNELS[selected.type] : USER_CHANNEL;
+            bulk.textContent = batchLabel(channel);
+            bulk.hidden = false;
+            bulk.onclick = async () => {
+                try {
+                    if (await exclusive(() => distributePage(channel))) await safeRefresh();
+                } catch (error) { showMessage("分发失败", error.message); }
+            };
             paneDefs.forEach(function (def) {
                 tabs[def.key].style.cssText = def.key === key ? TAB_ACTIVE_STYLE : TAB_BASE_STYLE;
                 panes[def.key].style.display = def.key === key ? "" : "none";
@@ -1683,13 +1714,12 @@ function mountInstructions(plugin, host) {
 
     const refreshButton = el("button", null, "刷新");
     const undo = el("button", null, "撤销上次操作");
-    const bulk = el("button", null, "一键分发");
+    const bulk = el("button");
     const last = el("span", "margin-right:auto;align-self:center;");
     refreshHistory = () => {
         const operation = history ? history.latest() : null;
         last.textContent = operation ? "上次操作：" + operation.label : "";
         undo.disabled = !operation;
-        bulk.disabled = !STATE_ROOT;
     };
     refreshButton.onclick = async () => {
         if (plugin.syncBusy) return;
@@ -1709,12 +1739,7 @@ function mountInstructions(plugin, host) {
             if (restored) await safeRefresh();
         } catch (error) { showMessage("撤销失败", error.message); }
     };
-    bulk.onclick = async () => {
-        if (!STATE_ROOT) return;
-        try {
-            if (await exclusive(distributeAll)) await safeRefresh();
-        } catch (error) { showMessage("分发失败", error.message); }
-    };
+    bulk.hidden = true;
     footer.appendChild(last);
     footer.appendChild(refreshButton);
     footer.appendChild(undo);
