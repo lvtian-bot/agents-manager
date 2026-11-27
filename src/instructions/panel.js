@@ -365,7 +365,7 @@ function mountInstructions(plugin, host) {
             recycleDone: "已把目标文件正文回收进 用户指令源笔记，同步基线已更新。",
             recycleTail: "",
             mergeDone: "两边已一致，该目标同步基线已更新。",
-            mergeUnsavedSource: "两侧内容一致，但 用户指令源笔记在编辑器中还有未保存的修改。\n请先保存源笔记，再点击面板底部的「刷新」。",
+            mergeUnsavedSource: "两侧内容一致，但 用户指令源笔记在编辑器中还有未保存的修改。\n请先保存源笔记，再点击面板顶部的「刷新」。",
             mergeIdentical: "两侧内容完全一致，已为该目标建立同步基线。",
             mergeTitle: function (target) { return "行级合并：" + target.name + " ← 用户指令源笔记"; },
             mergeHelp: "勾=保留该行，不勾=移除。红行=仅 用户指令源笔记有（默认不保留），绿行=仅目标文件有（默认保留）。" +
@@ -475,7 +475,7 @@ function mountInstructions(plugin, host) {
             recycleDone: "已把项目工作规范回收进 " + sourceTitle + "，该项目同步基线已更新。",
             recycleTail: "\n现在可直接分发给其他同类型项目。",
             mergeDone: "两边已一致，该项目同步基线已更新；现在可直接分发给其他同类型项目。",
-            mergeUnsavedSource: "两侧内容一致，但模板在编辑器中还有未保存的修改。\n请先保存模板，再点击面板底部的「刷新」。",
+            mergeUnsavedSource: "两侧内容一致，但模板在编辑器中还有未保存的修改。\n请先保存模板，再点击面板顶部的「刷新」。",
             mergeIdentical: "两侧内容完全一致，已为该项目建立同步基线。",
             mergeTitle: function (target) { return "行级合并：" + target.name + " 工作规范 ← " + sourceTitle; },
             mergeHelp: "勾=保留该行，不勾=移除。红行=仅模板有（默认不保留），绿行=仅项目有（默认保留）。" +

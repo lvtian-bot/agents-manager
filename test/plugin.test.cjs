@@ -1790,6 +1790,7 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     for (const pane of skillContent.children[1].children) {
         const scopeActions = pane.children[0].children[1];
         assert.deepEqual(scopeActions.children.map(n => n.textContent), ["新建技能", "管理分发目标", "检查更新"]);
+        assert.equal(scopeActions.children[2].title, "检查所有仓库的 GitHub 技能");
     }
     assert.deepEqual(skillActions.children.map(n => n.textContent), ["一键分发"]);
     assert.equal(skillRecord.children[1], sButton("撤销上次操作"));
@@ -2043,11 +2044,13 @@ test("技能更新先显示列表，打开时按来源复用一天的结果，�
     assert.ok(checkButtons.every(button => !button.disabled));
     const firstCheck = checkButtons[0].onclick();
     assert.ok(checkButtons.every(button => button.disabled));
+    assert.deepEqual(buttons("检查中"), checkButtons);
     await checkButtons[1].onclick();
     assert.equal(requests, 1);
     success();
     await firstCheck;
     assert.ok(checkButtons.every(button => !button.disabled));
+    assert.deepEqual(buttons("检查更新"), checkButtons);
     assert.deepEqual(updateSkills(), ["alpha"]);
     assert.ok(!buttons("更新")[0].disabled);
     assert.ok(findElements(plugin.body, node => node.textContent === "已是最新（2222222）").length);

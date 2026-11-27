@@ -954,6 +954,7 @@ function mountSkills(plugin, host) {
             createBtn.onclick = () => openCreateMenu(createBtn, scope);
             const checkBtn = el("button", "flex-shrink:0;font-size:var(--am-font-control);", "检查更新");
             checkBtn.type = "button";
+            checkBtn.title = "检查所有仓库的 GitHub 技能";
             checkBtn.onclick = runManualUpdateCheck;
             checkUpdateButtons.push(checkBtn);
             const scopeActions = el("div", "display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;margin-left:auto;max-width:100%;");
@@ -1018,7 +1019,11 @@ function mountSkills(plugin, host) {
     function refreshUpdateButtons() {
         const hasGitHub = scopes.some(scope => scope.skills.some(skill => skill.source.kind === "github"));
         const disabled = !stateRoot || !hasGitHub || manualCheckRunning;
-        for (const button of checkUpdateButtons) button.disabled = disabled;
+        const label = manualCheckRunning ? "检查中" : "检查更新";
+        for (const button of checkUpdateButtons) {
+            button.disabled = disabled;
+            button.textContent = label;
+        }
     }
 
     refreshHistory = () => {
