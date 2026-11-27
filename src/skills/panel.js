@@ -1,5 +1,6 @@
 const fs = require("fs");
 const { Menu, Notice, ToggleComponent } = require("obsidian");
+const { createWorkspaceFooter } = require("../workspace-footer");
 const { readText, replaceText } = require("../instructions/storage");
 const { skillUserPath, skillProjectPath, required } = require("../settings");
 const {
@@ -63,17 +64,9 @@ function mountSkills(plugin, host) {
 
     host.empty?.();
     const content = el("div", "flex:1;overflow:auto;scrollbar-gutter:stable;padding:16px 18px;min-height:0;");
-    const footer = el("div",
-        "display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 18px;" +
-        "border-top:1px solid var(--background-modifier-border);flex-shrink:0;");
     host.appendChild(content);
-    host.appendChild(footer);
-
-    const panel = el("div");
-    content.appendChild(panel);
-    content.appendChild(el("div",
-        "margin-top:14px;line-height:1.5;color:var(--text-muted);font-size:var(--am-font-secondary);",
-        "技能来自用户主目录、当前 Obsidian 库和已登记项目下的 .agents/skills。每个技能放在单独的子目录中，目录内须有 SKILL.md。"));
+    const { last, actions } = createWorkspaceFooter(host,
+        "技能来自用户主目录、当前 Obsidian 库和已登记项目下的 .agents/skills。每个技能放在单独的子目录中，目录内须有 SKILL.md。");
 
     function createModal(options) {
         const dialog = plugin.openDialog(options.title, options.onClose);
@@ -894,7 +887,7 @@ function mountSkills(plugin, host) {
         nextArea.appendChild(card);
         if (area) area.remove();
         area = nextArea;
-        panel.appendChild(area);
+        content.appendChild(area);
     }
 
     function render(nextScopes) {
@@ -969,7 +962,7 @@ function mountSkills(plugin, host) {
 
         if (area) area.remove();
         area = nextArea;
-        panel.appendChild(area);
+        content.appendChild(area);
         content.scrollTop = prevScroll;
     }
 
@@ -994,7 +987,6 @@ function mountSkills(plugin, host) {
         }
     }
 
-    const last = el("span", "margin-right:auto;align-self:center;font-size:var(--am-font-secondary);color:var(--text-muted);");
     const refreshButton = el("button", "font-size:var(--am-font-control);", "刷新");
     const checkUpdatesButton = el("button", "font-size:var(--am-font-control);", "检查更新");
     const undoButton = el("button", "font-size:var(--am-font-control);", "撤销上次操作");
@@ -1088,11 +1080,10 @@ function mountSkills(plugin, host) {
         }
     };
 
-    footer.appendChild(last);
-    footer.appendChild(refreshButton);
-    footer.appendChild(checkUpdatesButton);
-    footer.appendChild(undoButton);
-    footer.appendChild(bulkButton);
+    actions.appendChild(refreshButton);
+    actions.appendChild(checkUpdatesButton);
+    actions.appendChild(undoButton);
+    actions.appendChild(bulkButton);
 
     async function enterPanel() {
         await safeRefresh();

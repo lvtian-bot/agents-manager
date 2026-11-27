@@ -1555,8 +1555,9 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.equal(button("指令同步").getAttribute("aria-selected"), "true");
     assert.equal(button("指令同步").children[0].getAttribute("data-icon"), "refresh-cw");
     assert.match(button("指令同步").style.cssText, /border-bottom-color:var\(--text-accent\)/);
-    const instructionsContent = leaf.view.hosts.instructions.children[0];
-    assert.match(instructionsContent.children.at(-1).textContent, /^用户级指令同步整篇正文/);
+    const [instructionsContent, instructionsFooter] = leaf.view.hosts.instructions.children;
+    assert.equal(findElements(instructionsContent, n => n.textContent.startsWith("用户级指令同步整篇正文")).length, 0);
+    assert.match(instructionsFooter.children[0].children[1].textContent, /^用户级指令同步整篇正文/);
 
     await plugin.invoke("manage-skills");
     assert.equal(button("技能管理").getAttribute("aria-selected"), "true");
@@ -1598,8 +1599,11 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.ok(skillsTextIncludes("目录名不符合小写 kebab-case").length > 0);
     assert.ok(skillsTextIncludes("缺少 description").length > 0);
     assert.ok(skillsTextIncludes("包含 agents/openai.yaml").length > 0);
-    const skillContent = skillsHost.children[0];
-    assert.match(skillContent.children.at(-1).textContent, /^技能来自用户主目录/);
+    const [skillContent, skillFooter] = skillsHost.children;
+    const [operationInfo, skillActions] = skillFooter.children;
+    assert.equal(findElements(skillContent, n => n.textContent.startsWith("技能来自用户主目录")).length, 0);
+    assert.match(operationInfo.children[1].textContent, /^技能来自用户主目录/);
+    assert.equal(skillActions.children[0], sButton("刷新"));
     const warning = sButton("检查异常（4）");
     assert.equal(warning.parent.children[0].textContent, "Bad_Name");
     const issueDetails = skillsTextIncludes("缺少 description")[0];
@@ -1637,6 +1641,8 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.ok(skillsTextIncludes("失效链接（1）").length > 0);
     await sButton("清理").onclick();
     assert.equal(fs.lstatSync(path.join(customToolUserSkills, "old-removed"), { throwIfNoEntry: false }), undefined);
+    assert.match(operationInfo.children[0].textContent, /^上次操作：清理失效链接 old-removed/);
+    assert.match(operationInfo.children[1].textContent, /^技能来自用户主目录/);
 
     const linkSwitch = (name, tool) => findElements(skillsHost, node =>
         node.getAttribute("role") === "switch" && node.getAttribute("aria-label") === name + " 链接到 " + tool)[0];
