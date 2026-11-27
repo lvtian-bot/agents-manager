@@ -1050,7 +1050,7 @@ test("同步面板操作后原地刷新保留标签页与滚动位置，并支�
     assert.equal(read(targetB), v1FromA + "\n" + bodyB);
     assertStayedInWorkTab("第二级：Work 类型");
 
-    // 3. 外部改动模板与项目A后点击底栏「刷新」按钮。
+    // 3. 外部改动模板与项目A后点击列表顶部的「刷新」按钮。
     const v2 = "# 工作规范\n模板二次更新";
     const v2FromA = "# 工作规范\n项目A二次更新";
     write(workSourcePath, v2 + "\n" + templateTail);
@@ -1644,6 +1644,10 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     const [instructionsContent, instructionsFooter] = leaf.view.hosts.instructions.children;
     assert.equal(findElements(instructionsContent, n => n.textContent.startsWith("用户级指令同步整篇正文")).length, 0);
     assert.match(instructionsFooter.children[0].children[1].textContent, /^用户级指令同步整篇正文/);
+    const [instructionRecord] = instructionsFooter.children[0].children;
+    assert.equal(instructionRecord.children[1].textContent, "撤销上次操作");
+    assert.deepEqual(instructionsContent.children[0].children[1].children.map(n => n.textContent), ["刷新"]);
+    assert.equal(instructionsFooter.children[1].children.length, 1);
 
     await plugin.invoke("manage-skills");
     assert.equal(button("技能管理").getAttribute("aria-selected"), "true");
@@ -1687,9 +1691,12 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.ok(skillsTextIncludes("包含 agents/openai.yaml").length > 0);
     const [skillContent, skillFooter] = skillsHost.children;
     const [operationInfo, skillActions] = skillFooter.children;
+    const [skillRecord, skillExplanation] = operationInfo.children;
     assert.equal(findElements(skillContent, n => n.textContent.startsWith("技能来自用户主目录")).length, 0);
-    assert.match(operationInfo.children[1].textContent, /^技能来自用户主目录/);
-    assert.equal(skillActions.children[0], sButton("刷新"));
+    assert.match(skillExplanation.textContent, /^技能来自用户主目录/);
+    assert.deepEqual(skillContent.children[0].children[1].children.map(n => n.textContent), ["刷新", "检查更新"]);
+    assert.deepEqual(skillActions.children.map(n => n.textContent), ["一键分发"]);
+    assert.equal(skillRecord.children[1], sButton("撤销上次操作"));
     const warning = sButton("检查异常（4）");
     assert.equal(warning.parent.children[0].textContent, "Bad_Name");
     const issueDetails = skillsTextIncludes("缺少 description")[0];
@@ -1703,7 +1710,14 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     const [userTable, projectTable] = findElements(skillsHost, node => node.tag === "table");
     assert.match(userTable.style.cssText, /table-layout:fixed/);
     assert.equal(userTable.style.cssText, projectTable.style.cssText);
-    assert.equal(findElements(projectTable, node => node.tag === "th" && node.getAttribute("aria-hidden") === "true")[0].colSpan, 1);
+    const projectHeaders = findElements(projectTable, n => n.tag === "thead")[0].children[0].children;
+    assert.equal(projectHeaders[3].getAttribute("aria-hidden"), "true");
+    assert.equal(projectHeaders[3].colSpan, 1);
+    assert.equal(projectHeaders[4].textContent, "Claude");
+    assert.match(projectHeaders[4].style.cssText, /text-align:right/);
+    const projectRow = findElements(projectTable, n => n.tag === "tbody")[0].children[0];
+    assert.equal(projectRow.children[3].getAttribute("aria-hidden"), "true");
+    assert.match(projectRow.children[4].children[0].style.cssText, /justify-content:flex-end/);
     sButton("项目A（1）").onclick();
     assert.equal(userTable.parent.parent.style.display, "none");
     assert.equal(projectTable.parent.parent.style.display, "");
@@ -1727,8 +1741,10 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.ok(skillsTextIncludes("失效链接（1）").length > 0);
     await sButton("清理").onclick();
     assert.equal(fs.lstatSync(path.join(customToolUserSkills, "old-removed"), { throwIfNoEntry: false }), undefined);
-    assert.match(operationInfo.children[0].textContent, /^上次操作：清理失效链接 old-removed/);
-    assert.match(operationInfo.children[1].textContent, /^技能来自用户主目录/);
+    assert.match(skillRecord.children[0].textContent, /^上次操作：清理失效链接 old-removed/);
+    assert.equal(instructionRecord.children[0].textContent, "");
+    assert.equal(instructionRecord.children[1].disabled, true);
+    assert.match(skillExplanation.textContent, /^技能来自用户主目录/);
 
     const linkSwitch = (name, tool) => findElements(skillsHost, node =>
         node.getAttribute("role") === "switch" && node.getAttribute("aria-label") === name + " 链接到 " + tool)[0];

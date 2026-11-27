@@ -3,7 +3,7 @@ var path = require("path");
 var os = require("os");
 var crypto = require("crypto");
 const { Notice, Menu } = require("obsidian");
-const { createWorkspaceFooter } = require("../workspace-footer");
+const { createWorkspaceToolbar, createWorkspaceFooter } = require("../workspace-controls");
 const { syncDirectory, readText, replaceText, createHistory } = require("./storage");
 const { normalizeNewlines, extractInstructionBody, parseWorkStructure, rebuildDocument, computeLineDiff, composeMergedBody } = require("./documents");
 const { harnessTargets, NotePicker, vaultPath } = require("../settings");
@@ -1443,7 +1443,8 @@ function mountInstructions(plugin, host) {
     host.empty?.();
     var content = el("div", "flex:1;overflow:auto;padding:16px 18px;min-height:0;");
     host.appendChild(content);
-    const { last, actions } = createWorkspaceFooter(host,
+    const { tabs: tabBar, actions: listActions } = createWorkspaceToolbar(content);
+    const { last, record, actions } = createWorkspaceFooter(host,
         "用户级指令同步整篇正文。Work 和 Code 项目只同步第一个一级标题及其内容，到第二个一级标题前为止。");
 
     var TAB_BASE_STYLE =
@@ -1456,6 +1457,7 @@ function mountInstructions(plugin, host) {
 
     function renderInitError(error) {
         var nextArea = el("div");
+        tabBar.empty();
         appendCard(nextArea, {
             title: "指令分发失败",
             pathText: "",
@@ -1518,7 +1520,7 @@ function mountInstructions(plugin, host) {
             });
         });
 
-        var tabBar = el("div", "display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;");
+        tabBar.empty();
         var tabs = {};
         var panes = {};
 
@@ -1570,7 +1572,6 @@ function mountInstructions(plugin, host) {
             settlePending(key, wasPending);
         };
 
-        nextArea.appendChild(tabBar);
         paneDefs.forEach(function (def) {
             tabs[def.key] = document.createElement("button");
             panes[def.key] = document.createElement("div");
@@ -1668,6 +1669,7 @@ function mountInstructions(plugin, host) {
     const refreshButton = el("button", "font-size:var(--am-font-control);", "刷新");
     const undo = el("button", "font-size:var(--am-font-control);", "撤销上次操作");
     const bulk = el("button", "font-size:var(--am-font-control);");
+    listActions.appendChild(refreshButton);
     refreshHistory = () => {
         const operation = history ? history.latest() : null;
         last.textContent = operation ? "上次操作：" + operation.label : "";
@@ -1692,8 +1694,7 @@ function mountInstructions(plugin, host) {
         } catch (error) { showMessage("撤销失败", error.message); }
     };
     bulk.hidden = true;
-    actions.appendChild(refreshButton);
-    actions.appendChild(undo);
+    record.appendChild(undo);
     actions.appendChild(bulk);
 
     // 轻量确认弹窗：确认 resolve(true)，取消或关闭 resolve(false)。

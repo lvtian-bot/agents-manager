@@ -1,6 +1,6 @@
 const fs = require("fs");
 const { Menu, Notice, setIcon, ToggleComponent } = require("obsidian");
-const { createWorkspaceFooter } = require("../workspace-footer");
+const { createWorkspaceToolbar, createWorkspaceFooter } = require("../workspace-controls");
 const { readText, replaceText } = require("../instructions/storage");
 const { skillUserPath, skillProjectPath, required } = require("../settings");
 const {
@@ -65,7 +65,8 @@ function mountSkills(plugin, host) {
     host.empty?.();
     const content = el("div", "flex:1;overflow:auto;scrollbar-gutter:stable;padding:16px 18px;min-height:0;");
     host.appendChild(content);
-    const { last, actions } = createWorkspaceFooter(host,
+    const { tabs: tabBar, actions: listActions } = createWorkspaceToolbar(content);
+    const { last, record, actions } = createWorkspaceFooter(host,
         "技能来自用户主目录、当前 Obsidian 库和已登记项目下的 .agents/skills。每个技能放在单独的子目录中，目录内须有 SKILL.md。");
 
     function createModal(options) {
@@ -747,10 +748,12 @@ function mountSkills(plugin, host) {
         actionCell.appendChild(actions);
         row.appendChild(actionCell);
 
+        appendEmptyHarnessCells(row, emptyHarnessColumns, "td");
+
         if (scope.harnessStates.length) {
             for (const hState of scope.harnessStates) {
                 const cell = el("td", SKILL_CELL_STYLE);
-                const line = el("div", "display:flex;align-items:center;gap:4px;flex-wrap:wrap;");
+                const line = el("div", "display:flex;align-items:center;justify-content:flex-end;gap:4px;flex-wrap:wrap;text-align:right;");
                 cell.appendChild(line);
                 if (hState.status === "whole-dir-linked") {
                     const status = el("span", "color:var(--text-muted);", "整目录已链接");
@@ -790,8 +793,6 @@ function mountSkills(plugin, host) {
                 row.appendChild(cell);
             }
         }
-
-        appendEmptyHarnessCells(row, emptyHarnessColumns, "td");
 
         const viewBtn = el("button", SKILL_ACTION_STYLE, "查看");
         viewBtn.onclick = () => openViewSkillModal(skill);
@@ -865,14 +866,16 @@ function mountSkills(plugin, host) {
 
         const head = el("thead");
         const columns = el("tr");
-        for (const label of ["技能", "类型", "操作", ...scope.harnessStates.map(tool => tool.name)]) {
-            const header = el("th", SKILL_CELL_STYLE + TRUNCATE_STYLE + "text-align:left;", label);
+        const appendHeader = (label, alignment) => {
+            const header = el("th", SKILL_CELL_STYLE + TRUNCATE_STYLE + "text-align:" + alignment + ";", label);
             header.setAttribute("scope", "col");
             header.title = label;
             columns.appendChild(header);
-        }
+        };
         const emptyHarnessColumns = harnessColumns - scope.harnessStates.length;
+        for (const label of ["技能", "类型", "操作"]) appendHeader(label, "left");
         appendEmptyHarnessCells(columns, emptyHarnessColumns, "th");
+        for (const tool of scope.harnessStates) appendHeader(tool.name, "right");
         head.appendChild(columns);
         table.appendChild(head);
         const body = el("tbody");
@@ -884,6 +887,7 @@ function mountSkills(plugin, host) {
 
     function renderInitError(error) {
         const nextArea = el("div");
+        tabBar.empty();
         const card = el("div",
             "border:1px solid var(--background-modifier-border);border-radius:6px;padding:14px;");
         card.appendChild(el("div", "font-weight:600;margin-bottom:6px;", "技能管理不可用"));
@@ -902,7 +906,7 @@ function mountSkills(plugin, host) {
         const nextArea = el("div");
         const harnessColumns = scopes.reduce((count, scope) => Math.max(count, scope.harnessStates.length), 0);
 
-        const tabBar = el("div", "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;");
+        tabBar.empty();
         const tabs = {};
         const panes = {};
 
@@ -915,7 +919,6 @@ function mountSkills(plugin, host) {
             }
         };
 
-        nextArea.appendChild(tabBar);
         for (const scope of scopes) {
             const tab = el("button", null, scope.name + "（" + scope.skills.length + "）");
             tab.onclick = () => activateTab(scope.key);
@@ -996,6 +999,8 @@ function mountSkills(plugin, host) {
     const checkUpdatesButton = el("button", "font-size:var(--am-font-control);", "检查更新");
     const undoButton = el("button", "font-size:var(--am-font-control);", "撤销上次操作");
     const bulkButton = el("button", "font-size:var(--am-font-control);", "一键分发");
+    listActions.appendChild(refreshButton);
+    listActions.appendChild(checkUpdatesButton);
 
     refreshHistory = () => {
         const op = history ? history.latest() : null;
@@ -1085,9 +1090,7 @@ function mountSkills(plugin, host) {
         }
     };
 
-    actions.appendChild(refreshButton);
-    actions.appendChild(checkUpdatesButton);
-    actions.appendChild(undoButton);
+    record.appendChild(undoButton);
     actions.appendChild(bulkButton);
 
     async function enterPanel() {
