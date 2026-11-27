@@ -2,7 +2,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { normalizeNewlines } = require("../instructions/documents");
-const { syncDirectory, readText, replaceText } = require("../instructions/storage");
+const { syncDirectory, readText } = require("../instructions/storage");
 
 const KEBAB_CASE_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
@@ -78,8 +78,10 @@ function sourcesFilePath(stateRoot) {
 }
 
 function readSkillSources(stateRoot) {
-    const file = sourcesFilePath(stateRoot);
-    const raw = readText(file);
+    return parseSkillSources(readText(sourcesFilePath(stateRoot)));
+}
+
+function parseSkillSources(raw) {
     if (raw === null) return { version: 1, skills: {} };
     let parsed;
     try {
@@ -87,15 +89,21 @@ function readSkillSources(stateRoot) {
     } catch (error) {
         throw new Error("技能来源记录无法解析：" + error.message);
     }
-    if (!parsed || typeof parsed.skills !== "object" || Array.isArray(parsed.skills)) {
+    if (!parsed?.skills || typeof parsed.skills !== "object" || Array.isArray(parsed.skills)) {
         throw new Error("技能来源记录结构不正确（缺少 skills 对象）。");
     }
     return { version: 1, skills: parsed.skills };
 }
 
-function writeSkillSources(stateRoot, data) {
-    const payload = { version: 1, skills: data.skills || {} };
-    replaceText(sourcesFilePath(stateRoot), JSON.stringify(payload, null, 2) + "\n");
+function skillSourceChange(stateRoot, sourceKey, source) {
+    const sourcesPath = sourcesFilePath(stateRoot);
+    const beforeSourcesText = readText(sourcesPath);
+    const sourcesDoc = parseSkillSources(beforeSourcesText);
+    if (source) sourcesDoc.skills[sourceKey] = source;
+    else if (Object.hasOwn(sourcesDoc.skills, sourceKey)) delete sourcesDoc.skills[sourceKey];
+    else return {};
+    const afterSourcesText = JSON.stringify(sourcesDoc, null, 2) + "\n";
+    return { sourcesPath, beforeSourcesText, afterSourcesText };
 }
 
 function parseSourceInput(urlInput, commitInput) {
@@ -213,7 +221,7 @@ function validateSkill(skillDir, dirName, parsed) {
     if (!parsed.description) {
         issues.push("缺少 description");
     }
-    if (fs.existsSync(path.join(skillDir, "agents", "openai.yaml"))) {
+    if (skillDir && fs.existsSync(path.join(skillDir, "agents", "openai.yaml"))) {
         issues.push("包含 agents/openai.yaml");
     }
     return issues;
@@ -222,6 +230,17 @@ function validateSkill(skillDir, dirName, parsed) {
 function skillSourceKey(scopeKind, projectRoot, skillName) {
     if (scopeKind === "user") return "user/" + skillName;
     return canonicalPath(projectRoot) + "/" + skillName;
+}
+
+function skillCreationTarget(scope, name) {
+    if (!KEBAB_CASE_RE.test(name) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(name)) {
+        throw new Error("目录名不符合小写 kebab-case：" + name);
+    }
+    const dir = path.join(scope.sourceRoot, name);
+    if (fs.lstatSync(dir, { throwIfNoEntry: false })) {
+        throw new Error("目标路径已存在内容，已停止：" + dir);
+    }
+    return { dir, name, sourceKey: skillSourceKey(scope.kind, scope.projectRoot, name) };
 }
 
 function scanSkillsInDir(sourceRoot, scopeKind, projectRoot, sourcesMap) {
@@ -288,7 +307,7 @@ function buildHarnessTargets(entries, baseDir) {
     }));
 }
 
-function scanAllSkillScopes(plugin, stateRoot) {
+function scanAllSkillScopes(plugin, stateRoot, { includeEmpty = false } = {}) {
     const sourcesDoc = readSkillSources(stateRoot);
     const projects = readProjectRegistry(stateRoot);
     const scopes = [];
@@ -316,7 +335,7 @@ function scanAllSkillScopes(plugin, stateRoot) {
                 project => canonicalPath(path.dirname(project.path)) === vaultRootKey
             );
             const vaultSkills = scanSkillsInDir(vaultSourceRoot, "vault", vaultRoot, sourcesDoc.skills);
-            if (vaultSkills.length) {
+            if (includeEmpty || vaultSkills.length) {
                 scopes.push({
                     key: "vault:" + vaultRootKey,
                     kind: "vault",
@@ -340,7 +359,7 @@ function scanAllSkillScopes(plugin, stateRoot) {
         const sourceRoot = path.join(projectRoot, ".agents", "skills");
         if (canonicalPath(sourceRoot) === userSourceRootKey) continue;
         const skills = scanSkillsInDir(sourceRoot, "project", projectRoot, sourcesDoc.skills);
-        if (!skills.length) continue;
+        if (!includeEmpty && !skills.length) continue;
 
         scopes.push({
             key: "project:" + rootKey,
@@ -364,10 +383,11 @@ module.exports = {
     readProjectRegistry,
     sourcesFilePath,
     readSkillSources,
-    writeSkillSources,
+    skillSourceChange,
     parseSourceInput,
     parseSkillFrontmatter,
     validateSkill,
     skillSourceKey,
+    skillCreationTarget,
     scanAllSkillScopes,
 };

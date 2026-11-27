@@ -158,7 +158,7 @@ function collectMissingAncestors(dirPath) {
 function removeEmptyDirs(dirs) {
     for (const dir of dirs.slice().reverse()) {
         try {
-            if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) {
+            if (inspectPath(dir).kind === "directory" && fs.readdirSync(dir).length === 0) {
                 fs.rmdirSync(dir);
             }
         } catch {
@@ -228,7 +228,7 @@ function resolveSafeChildPath(rootDir, rel) {
     return { parts: segments, destAbs };
 }
 
-function writeSnapshotFiles(rootDir, files, expectedOldFiles) {
+function writeSnapshotFiles(rootDir, files, expectedOldFiles, createdFiles) {
     const resolvedFiles = files.map(item => ({ item, resolved: resolveSafeChildPath(rootDir, item.rel) }));
     const resolvedOld = expectedOldFiles.map(old => ({ old, resolved: resolveSafeChildPath(rootDir, old.rel) }));
     assertNoSymlinksForSnapshot(rootDir);
@@ -249,16 +249,28 @@ function writeSnapshotFiles(rootDir, files, expectedOldFiles) {
             current = path.join(current, resolved.parts[i]);
             const ancStat = fs.lstatSync(current, { throwIfNoEntry: false });
             if (ancStat && !ancStat.isDirectory()) {
+                if (createdFiles) throw new Error("目标路径已存在内容，已停止：" + current);
                 fs.unlinkSync(current);
             }
         }
         const destStat = fs.lstatSync(resolved.destAbs, { throwIfNoEntry: false });
         if (destStat && destStat.isDirectory()) {
+            if (createdFiles) throw new Error("目标路径已存在内容，已停止：" + resolved.destAbs);
             fs.rmSync(resolved.destAbs, { recursive: true, force: true });
         }
         fs.mkdirSync(path.dirname(resolved.destAbs), { recursive: true });
         const buf = Buffer.from(item.base64, "base64");
-        fs.writeFileSync(resolved.destAbs, buf);
+        if (createdFiles) {
+            const fd = fs.openSync(resolved.destAbs, "wx");
+            createdFiles.push(item.rel);
+            try {
+                fs.writeFileSync(fd, buf);
+            } finally {
+                fs.closeSync(fd);
+            }
+        } else {
+            fs.writeFileSync(resolved.destAbs, buf);
+        }
         if (typeof item.mode === "number") {
             fs.chmodSync(resolved.destAbs, item.mode);
         }
@@ -337,11 +349,22 @@ function createSkillsHistory(stateRoot) {
             }
             return;
         }
-        if (op.type === "github-update") {
+        if (op.type === "github-update" || op.type === "create-skill") {
             assertNoSymlinksForSnapshot(op.skillDir);
+            if (op.type === "create-skill") {
+                if (op.sourcesPath && readText(op.sourcesPath) !== op.beforeSourcesText) {
+                    throw new Error("技能来源记录已发生变化，请刷新后重试。");
+                }
+                fs.mkdirSync(path.dirname(op.skillDir), { recursive: true });
+                fs.mkdirSync(op.skillDir);
+            }
             rollbackLog.mutated = true;
-            writeSnapshotFiles(op.skillDir, op.afterFiles, op.beforeFiles);
-            replaceText(op.sourcesPath, op.afterSourcesText);
+            writeSnapshotFiles(op.skillDir, op.afterFiles, op.beforeFiles,
+                op.type === "create-skill" ? rollbackLog.createdFiles : undefined);
+            if (op.sourcesPath) {
+                replaceText(op.sourcesPath, op.afterSourcesText);
+                rollbackLog.wroteSources = true;
+            }
         }
     }
 
@@ -425,6 +448,24 @@ function createSkillsHistory(stateRoot) {
             fs.symlinkSync(op.wholeTarget, op.targetDir, linkType);
             return;
         }
+        if (op.type === "create-skill") {
+            if (inspectPath(op.skillDir).kind === "directory") {
+                assertNoSymlinksForSnapshot(op.skillDir);
+                for (const file of op.afterFiles) {
+                    const { parts, destAbs } = resolveSafeChildPath(op.skillDir, file.rel);
+                    if (inspectPath(destAbs).kind !== "file") continue;
+                    fs.unlinkSync(destAbs);
+                    const parents = parts.slice(0, -1).map((_, index) =>
+                        path.join(op.skillDir, ...parts.slice(0, index + 1)));
+                    removeEmptyDirs(parents);
+                }
+            }
+            removeEmptyDirs(op.createdDirs || [op.skillDir]);
+            if (op.sourcesPath && readText(op.sourcesPath) !== op.beforeSourcesText) {
+                replaceText(op.sourcesPath, op.beforeSourcesText);
+            }
+            return;
+        }
         if (op.type === "github-update") {
             const currentDisk = snapshotDirectoryFiles(op.skillDir);
             writeSnapshotFiles(op.skillDir, op.beforeFiles, currentDisk);
@@ -470,7 +511,7 @@ function createSkillsHistory(stateRoot) {
                 }
             }
             return changed;
-        } else if (op.type === "github-update") {
+        } else if (op.type === "github-update" || op.type === "create-skill") {
             const normalizeFiles = list => list.map(file => ({
                 rel: file.rel,
                 base64: file.base64,
@@ -479,9 +520,9 @@ function createSkillsHistory(stateRoot) {
             const currentDisk = JSON.stringify(normalizeFiles(snapshotDirectoryFiles(op.skillDir)));
             const expectedAfter = JSON.stringify(normalizeFiles(op.afterFiles));
             const expectedBefore = JSON.stringify(normalizeFiles(op.beforeFiles));
-            const currentSources = readText(op.sourcesPath);
+            const currentSources = op.sourcesPath && readText(op.sourcesPath);
             const dirChanged = currentDisk !== expectedAfter && currentDisk !== expectedBefore;
-            const sourcesChanged = currentSources !== op.afterSourcesText && currentSources !== op.beforeSourcesText;
+            const sourcesChanged = op.sourcesPath && currentSources !== op.afterSourcesText && currentSources !== op.beforeSourcesText;
             const changed = [];
             if (dirChanged) changed.push(op.skillDir);
             if (sourcesChanged) changed.push(op.sourcesPath);
@@ -493,7 +534,7 @@ function createSkillsHistory(stateRoot) {
     async function apply(op) {
         if (fs.existsSync(pendingPath)) throw new Error("上次技能操作尚未完成，请先撤销上次操作。");
         replaceText(pendingPath, JSON.stringify(op));
-        const rollbackLog = { mutated: false, actions: [], createdDirs: [] };
+        const rollbackLog = { mutated: false, actions: [], createdDirs: [], createdFiles: [], wroteSources: false };
         try {
             await runForward(op, rollbackLog);
             replaceText(pendingPath, JSON.stringify(op));
@@ -504,6 +545,12 @@ function createSkillsHistory(stateRoot) {
                     if (rollbackLog.actions.length || rollbackLog.createdDirs.length) {
                         await runRestore({ ...op, actions: rollbackLog.actions, createdDirs: rollbackLog.createdDirs }, true);
                     }
+                } else if (op.type === "create-skill" && rollbackLog.mutated) {
+                    await runRestore({
+                        ...op,
+                        afterFiles: op.afterFiles.filter(file => rollbackLog.createdFiles.includes(file.rel)),
+                        sourcesPath: rollbackLog.wroteSources ? op.sourcesPath : null,
+                    }, true);
                 } else if (rollbackLog.mutated) {
                     await runRestore(op, true);
                 }
@@ -544,7 +591,7 @@ function createSkillsHistory(stateRoot) {
             }
             return;
         }
-        if (op.type === "github-update") {
+        if (op.type === "github-update" || op.type === "create-skill") {
             assertNoSymlinksForSnapshot(op.skillDir);
         }
     }
@@ -572,6 +619,19 @@ function createSkillsHistory(stateRoot) {
     }
 
     return { latest, apply, undo };
+}
+
+async function createSkill(history, skill, files, sources = {}) {
+    await history.apply({
+        type: "create-skill",
+        label: "新建技能：" + skill.name,
+        skillDir: skill.dir,
+        createdDirs: collectMissingAncestors(skill.dir),
+        beforeFiles: [],
+        afterFiles: files,
+        ...sources,
+    });
+    return skill;
 }
 
 async function saveSelfSkillEdit(history, skill, beforeText, afterText) {
@@ -701,6 +761,7 @@ module.exports = {
     inspectScopeHarnesses,
     snapshotDirectoryFiles,
     createSkillsHistory,
+    createSkill,
     saveSelfSkillEdit,
     distributeSingleSkill,
     unlinkSingleSkill,

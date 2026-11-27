@@ -1169,6 +1169,111 @@ test("技能管理可在页面内弹窗维护用户级与项目级分发目标�
     await plugin.closeWorkspace();
 });
 
+test("技能管理可新建自建技能和导入 GitHub 技能，支持在空项目创建、拒绝覆盖与撤销", async (t) => {
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-create-skill-"));
+    t.after(() => fs.rmSync(fixtureDir, { recursive: true, force: true }));
+    const vaultRoot = path.join(fixtureDir, "vault");
+    const syncRoot = path.join(vaultRoot, ".obsidian", "plugins", "agents-manager", "sync");
+    const project = path.join(fixtureDir, "empty-project");
+    const userSkills = path.join(fixtureDir, "home", ".agents", "skills");
+    const sourcesPath = path.join(syncRoot, "skills-sources.json");
+    fs.mkdirSync(syncRoot, { recursive: true });
+    fs.mkdirSync(project);
+    fs.writeFileSync(path.join(syncRoot, "instruction-projects.json"), JSON.stringify({
+        projects: [{ name: "空项目", type: "code", path: path.join(project, "AGENTS.md") }],
+    }));
+    const sha = "2222222222222222222222222222222222222222";
+    let menu;
+    let failDownload = false;
+    let failSaveSource = false;
+    const app = { vault: { adapter: { getBasePath: () => vaultRoot } } };
+    const { body, invoke } = await loadPlugin(app, {
+        fixtureDir,
+        notices: [],
+        menu: items => { menu = items; },
+        filesystem: {
+            ...fs,
+            renameSync(from, to) {
+                if (failSaveSource && to === sourcesPath) throw new Error("模拟来源保存失败");
+                return fs.renameSync(from, to);
+            },
+        },
+        async fetch(url) {
+            if (url.includes("/commits?")) return { ok: true, json: async () => [{ sha }] };
+            if (url.includes("/git/trees/")) {
+                return { ok: true, json: async () => ({
+                    tree: [{ type: "blob", sha: "blob-md", path: "skills/imported-skill/SKILL.md" }],
+                }) };
+            }
+            assert.match(url, /raw\.githubusercontent\.com\/owner\/repo\/.+\/skills\/imported-skill\/SKILL\.md$/);
+            if (failDownload) return { ok: false, status: 503, text: async () => "" };
+            return { ok: true, arrayBuffer: async () => Buffer.from("---\nname: imported-skill\ndescription: 导入的技能。\n---\n") };
+        },
+    });
+    const find = predicate => findElements(body, predicate);
+    const button = label => find(node => node.tag === "button" && node.textContent === label).at(-1);
+    const field = label => find(node => node.getAttribute("aria-label") === label).at(-1);
+    const open = kind => {
+        find(node => node.tag === "button" && node.textContent === "新建技能")[0].onclick();
+        assert.deepEqual(menu.map(item => item.title), ["自建", "GitHub"]);
+        menu.find(item => item.title === kind).action();
+    };
+    await invoke("manage-skills");
+    open("自建");
+    button("取消").onclick();
+    assert.equal(fs.existsSync(userSkills), false);
+
+    open("自建");
+    const name = field("技能名称");
+    name.value = "my-skill";
+    name.oninput();
+    const editor = find(node => node.tag === "textarea")[0];
+    assert.match(editor.value, /name: my-skill/);
+    editor.value = editor.value.replace("description: ", "description: 自建技能。");
+    await button("保存").onclick();
+    assert.match(fs.readFileSync(path.join(userSkills, "my-skill", "SKILL.md"), "utf8"), /description: 自建技能/);
+    assert.equal(field("类型").value, "self");
+    await button("撤销上次操作").onclick();
+    assert.equal(fs.existsSync(userSkills), false);
+
+    const url = "https://github.com/owner/repo/tree/main/skills/imported-skill";
+    const dir = path.join(project, ".agents", "skills", "imported-skill");
+    open("GitHub");
+    const destination = field("范围");
+    destination.value = destination.children.find(option => option.textContent === "空项目").value;
+    field("GitHub 上游地址").value = url;
+    failDownload = true;
+    await button("导入").onclick();
+    assert.equal(fs.existsSync(dir), false);
+    assert.equal(fs.existsSync(sourcesPath), false);
+    assert.equal(find(node => node.textContent?.includes("HTTP 503")).length, 1);
+    failDownload = false;
+    failSaveSource = true;
+    await button("导入").onclick();
+    assert.equal(fs.existsSync(dir), false);
+    assert.equal(fs.existsSync(sourcesPath), false);
+    assert.equal(find(node => node.textContent?.includes("模拟来源保存失败")).length, 1);
+    failSaveSource = false;
+    await button("导入").onclick();
+    const imported = fs.readFileSync(path.join(dir, "SKILL.md"), "utf8");
+    assert.match(imported, /name: imported-skill/);
+    assert.equal(field("类型").value, "github");
+    assert.equal(find(node => node.textContent === "空项目（1）").length, 1);
+    assert.equal(Object.values(JSON.parse(fs.readFileSync(sourcesPath, "utf8")).skills)[0].commit, sha);
+
+    open("GitHub");
+    const existingScope = field("范围");
+    existingScope.value = existingScope.children.find(option => option.textContent === "空项目").value;
+    field("GitHub 上游地址").value = url;
+    await button("导入").onclick();
+    assert.equal(find(node => node.textContent?.includes("目标路径已存在内容")).length, 1);
+    assert.equal(fs.readFileSync(path.join(dir, "SKILL.md"), "utf8"), imported);
+    button("取消").onclick();
+    await button("撤销上次操作").onclick();
+    assert.equal(fs.existsSync(dir), false);
+    assert.equal(fs.existsSync(sourcesPath), false);
+});
+
 test("技能管理支持工作区切换、检查、自建编辑、逐个分发、整目录转换及 GitHub 更新与撤销", async (t) => {
     const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-skills-e2e-"));
     t.after(() => fs.rmSync(fixtureDir, { recursive: true, force: true }));
@@ -1420,18 +1525,29 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     await failedUndo;
 
     // 5. GitHub 来源设置（含 @ commit 粘贴格式）、检查更新、直接更新与撤销
-    const sourceButtons = findElements(skillsHost, node => node.tag === "button" && node.textContent === "设置来源");
-    assert.equal(sourceButtons.length, 5);
-    sourceButtons[3].onclick(); // 用户级 gog 排在 alpha-skill, Bad_Name, conflict-skill 之后
-    const modeSelect = findElements(plugin.body, node => node.getAttribute("aria-label") === "来源类型")[0];
+    const columns = findElements(skillsHost, node => node.getAttribute("scope") === "col");
+    assert.deepEqual(columns.slice(0, 5).map(column => column.textContent), ["技能", "类型", "操作", "Claude", "CustomTool"]);
+    const typeFor = name => findElements(skillsHost, node => node.getAttribute("aria-label") === "类型" && node.title === name)[0];
+    const modeSelect = typeFor("gog");
+    assert.equal(modeSelect.value, "self");
     modeSelect.value = "github";
-    modeSelect.onchange();
+    await modeSelect.onchange();
+    assert.equal(modeSelect.value, "self");
+    sButton("取消").onclick();
+    modeSelect.value = "github";
+    await modeSelect.onchange();
     findElements(plugin.body, node => node.getAttribute("aria-label") === "GitHub 上游地址")[0].value =
         "https://github.com/openclaw/gogcli/tree/1111111111111111111111111111111111111111/.agents/skills/gog @ 1111111111111111111111111111111111111111";
     await sButton("保存").onclick();
-    assert.ok(skillsTextIncludes("GitHub · 1111111").length > 0);
+    assert.equal(typeFor("gog").value, "github");
     assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "编辑 SKILL.md").length, 4);
-    assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "查看 SKILL.md").length, 1);
+    assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "查看 SKILL.md").length, 5);
+    assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "修改链接").length, 1);
+    assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "设置来源").length, 0);
+    const gogRow = typeFor("gog").parent.parent;
+    assert.equal(gogRow.children.length, 5);
+    assert.equal(findElements(gogRow.children[2], node => node.textContent === "更新").length, 1);
+    assert.equal(findElements(gogRow.children[4], node => node.textContent === "分发").length, 1);
 
     await sButton("检查更新").onclick();
     assert.ok(skillsTextIncludes("发现新版本：2222222").length > 0);

@@ -1,11 +1,11 @@
 const fs = require("fs");
-const { Notice } = require("obsidian");
-const { readText } = require("../instructions/storage");
+const { Menu, Notice } = require("obsidian");
+const { readText, replaceText } = require("../instructions/storage");
 const { skillUserPath, skillProjectPath, required } = require("../settings");
 const {
     resolveStateRoot,
-    readSkillSources,
-    writeSkillSources,
+    skillCreationTarget,
+    skillSourceChange,
     parseSourceInput,
     parseSkillFrontmatter,
     validateSkill,
@@ -14,6 +14,7 @@ const {
 const {
     inspectScopeHarnesses,
     createSkillsHistory,
+    createSkill,
     saveSelfSkillEdit,
     distributeSingleSkill,
     unlinkSingleSkill,
@@ -21,7 +22,7 @@ const {
     convertWholeDirToPerSkill,
     distributeAllSkills,
 } = require("./links");
-const { parseGitHubUrl, checkGitHubUpdate, updateGitHubSkill } = require("./github");
+const { parseGitHubUrl, checkGitHubUpdate, updateGitHubSkill, importGitHubSkill } = require("./github");
 
 const TAB_BASE_STYLE =
     "flex:1;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;box-shadow:none;" +
@@ -30,6 +31,11 @@ const TAB_ACTIVE_STYLE =
     "flex:1;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;box-shadow:none;" +
     "background:var(--background-secondary);border:1px solid var(--background-modifier-border);" +
     "color:var(--text-normal);font-weight:600;";
+const SKILL_CELL_STYLE =
+    "padding:5px 8px;border:0;border-bottom:1px solid var(--background-modifier-border);" +
+    "vertical-align:middle;font-size:12px;";
+const SKILL_ACTION_STYLE =
+    "font-size:12px;padding:3px 7px;min-height:26px;height:auto;white-space:nowrap;";
 
 function el(tag, cssText, textContent) {
     const node = document.createElement(tag);
@@ -137,6 +143,47 @@ function mountSkills(plugin, host) {
         return loaded;
     }
 
+    function scopeField(parent, initialScope) {
+        const label = el("label", "display:grid;gap:4px;");
+        label.appendChild(el("span", "font-weight:600;", "范围"));
+        const select = el("select");
+        select.setAttribute("aria-label", "范围");
+        for (const scope of scanAllSkillScopes(plugin, stateRoot, { includeEmpty: true })) {
+            const option = el("option", null, scope.name);
+            option.value = scope.key;
+            option.title = scope.sourceRoot;
+            select.appendChild(option);
+        }
+        select.value = initialScope.key;
+        label.appendChild(select);
+        parent.appendChild(label);
+        return () => {
+            const scope = scanAllSkillScopes(plugin, stateRoot, { includeEmpty: true }).find(item => item.key === select.value);
+            if (!scope) throw new Error("找不到所选范围，请刷新后重试。");
+            return scope;
+        };
+    }
+
+    function skillTypeSelect(label, value) {
+        const select = el("select", "font-size:12px;");
+        select.setAttribute("aria-label", label);
+        for (const [kind, name] of [["self", "自建"], ["github", "GitHub"]]) {
+            const option = el("option", null, name);
+            option.value = kind;
+            select.appendChild(option);
+        }
+        select.value = value;
+        return select;
+    }
+
+    function openCreateMenu(button, scope) {
+        const menu = new Menu();
+        menu.addItem(item => item.setTitle("自建").onClick(() => openEditSkillModal(null, scope)));
+        menu.addItem(item => item.setTitle("GitHub").onClick(() => openGitHubLinkModal(null, scope)));
+        const bounds = button.getBoundingClientRect();
+        menu.showAtPosition({ x: bounds.left, y: bounds.bottom }, button.ownerDocument);
+    }
+
     function openViewSkillModal(skill) {
         const text = readText(skill.skillMdPath) ?? "";
         const modal = createModal({ title: "查看技能：" + skill.name, width: 820, widthVw: 94, maxHeight: 88 });
@@ -161,17 +208,31 @@ function mountSkills(plugin, host) {
         modal.footer.appendChild(closeBtn);
     }
 
-    function openEditSkillModal(skill) {
-        const beforeText = readText(skill.skillMdPath);
+    function openEditSkillModal(skill, creationScope) {
+        const beforeText = skill ? readText(skill.skillMdPath) : "---\nname: \ndescription: \n---\n\n";
         if (beforeText === null) {
             showMessage("无法编辑", "找不到 SKILL.md：" + skill.skillMdPath);
             return;
         }
-        const modal = createModal({ title: "编辑技能：" + skill.name, width: 840, widthVw: 94, maxHeight: 88 });
+        const modal = createModal({ title: skill ? "编辑技能：" + skill.name : "新建技能", width: 840, widthVw: 94, maxHeight: 88 });
         modal.body.style.cssText = "padding:16px 18px;overflow:auto;display:flex;flex-direction:column;gap:10px;";
-        modal.body.appendChild(el("div",
-            "font-family:var(--font-monospace);font-size:12px;color:var(--text-muted);word-break:break-all;",
-            skill.skillMdPath));
+        let destination;
+        let nameInput;
+        if (skill) {
+            modal.body.appendChild(el("div",
+                "font-family:var(--font-monospace);font-size:12px;color:var(--text-muted);word-break:break-all;",
+                skill.skillMdPath));
+        } else {
+            destination = scopeField(modal.body, creationScope);
+            const label = el("label", "display:grid;gap:4px;");
+            label.appendChild(el("span", "font-weight:600;", "技能名称"));
+            nameInput = el("input");
+            nameInput.type = "text";
+            nameInput.value = "";
+            nameInput.setAttribute("aria-label", "技能名称");
+            label.appendChild(nameInput);
+            modal.body.appendChild(label);
+        }
         const issueLine = el("div", "font-size:12px;line-height:1.5;");
         const editor = document.createElement("textarea");
         editor.value = beforeText;
@@ -180,7 +241,8 @@ function mountSkills(plugin, host) {
             "border-radius:6px;font-family:var(--font-monospace);font-size:12px;line-height:1.6;resize:vertical;";
 
         const updateLint = () => {
-            const issues = validateSkill(skill.dir, skill.name, parseSkillFrontmatter(editor.value));
+            const parsed = parseSkillFrontmatter(editor.value);
+            const issues = validateSkill(skill?.dir, skill?.name || nameInput.value.trim(), parsed);
             if (issues.length) {
                 issueLine.style.color = "var(--text-error)";
                 issueLine.textContent = "规范检查提示：" + issues.join("；");
@@ -190,6 +252,20 @@ function mountSkills(plugin, host) {
             }
         };
         editor.oninput = updateLint;
+        if (nameInput) {
+            let previousName = "";
+            nameInput.oninput = () => {
+                const name = nameInput.value.trim();
+                if (/^[a-z0-9-]*$/.test(name)) {
+                    const oldLine = "---\nname: " + previousName + "\n";
+                    if (editor.value.startsWith(oldLine)) {
+                        editor.value = "---\nname: " + name + "\n" + editor.value.slice(oldLine.length);
+                        previousName = name;
+                    }
+                }
+                updateLint();
+            };
+        }
         updateLint();
 
         modal.body.appendChild(issueLine);
@@ -200,8 +276,22 @@ function mountSkills(plugin, host) {
         const saveBtn = el("button", null, "保存");
         saveBtn.className = "mod-cta";
         saveBtn.onclick = async () => {
-            saveBtn.disabled = true;
+            saveBtn.disabled = cancelBtn.disabled = true;
             try {
+                if (!skill) {
+                    await exclusive(async () => {
+                        const scope = destination();
+                        const target = skillCreationTarget(scope, nameInput.value.trim());
+                        const issues = validateSkill(target.dir, target.name, parseSkillFrontmatter(editor.value));
+                        if (issues.length) throw new Error(issues.join("；"));
+                        const files = [{ rel: "SKILL.md", base64: Buffer.from(editor.value, "utf8").toString("base64"), mode: 0o644 }];
+                        await createSkill(history, target, files, skillSourceChange(stateRoot, target.sourceKey, null));
+                        activeScopeKey = scope.key;
+                    });
+                    modal.close();
+                    await safeRefresh();
+                    return;
+                }
                 const changed = await exclusive(() => saveSelfSkillEdit(history, skill, beforeText, editor.value));
                 modal.close();
                 if (changed) {
@@ -209,7 +299,7 @@ function mountSkills(plugin, host) {
                     await safeRefresh();
                 }
             } catch (error) {
-                saveBtn.disabled = false;
+                saveBtn.disabled = cancelBtn.disabled = false;
                 await showMessage("保存失败", error.message || String(error));
             }
         };
@@ -217,35 +307,20 @@ function mountSkills(plugin, host) {
         modal.footer.appendChild(saveBtn);
     }
 
-    function openSourceModal(skill) {
-        const modal = createModal({ title: "设置来源：" + skill.name, width: 620, widthVw: 92, maxHeight: 80 });
+    function openGitHubLinkModal(skill, creationScope) {
+        const title = !skill ? "新建技能" : skill.source.kind === "github" ? "修改链接" : "GitHub 上游地址";
+        const modal = createModal({ title, width: 620, widthVw: 92, maxHeight: 80 });
         modal.body.style.cssText = "padding:16px 18px;overflow:auto;display:flex;flex-direction:column;gap:12px;";
-
-        const modeSelect = document.createElement("select");
-        modeSelect.setAttribute("aria-label", "来源类型");
-        const selfOpt = document.createElement("option");
-        selfOpt.value = "self";
-        selfOpt.textContent = "自建技能（可编辑 SKILL.md）";
-        const ghOpt = document.createElement("option");
-        ghOpt.value = "github";
-        ghOpt.textContent = "GitHub 复制技能（直接更新，不编辑）";
-        modeSelect.appendChild(selfOpt);
-        modeSelect.appendChild(ghOpt);
-        modeSelect.value = skill.source.kind === "github" ? "github" : "self";
-
-        const modeRow = el("label", "display:flex;flex-direction:column;gap:4px;font-size:13px;");
-        modeRow.appendChild(el("span", "font-weight:600;", "来源类型"));
-        modeRow.appendChild(modeSelect);
-
-        const githubBox = el("div", "display:flex;flex-direction:column;gap:10px;");
+        const destination = skill ? null : scopeField(modal.body, creationScope);
         const urlLabel = el("label", "display:flex;flex-direction:column;gap:4px;font-size:13px;");
         urlLabel.appendChild(el("span", "font-weight:600;", "GitHub 上游地址"));
         const urlInput = el("input",
             "padding:6px 10px;border:1px solid var(--background-modifier-border);border-radius:6px;font-size:13px;");
         urlInput.type = "text";
         urlInput.setAttribute("aria-label", "GitHub 上游地址");
-        urlInput.placeholder = "https://github.com/owner/repo/tree/ref/path（也可直接粘贴「地址 @ commit」）";
-        urlInput.value = skill.source.url || "";
+        urlInput.placeholder = "https://github.com/owner/repo/tree/ref/path" +
+            (skill ? "（也可直接粘贴「地址 @ commit」）" : "");
+        urlInput.value = skill?.source.url || "";
         urlLabel.appendChild(urlInput);
 
         const commitLabel = el("label", "display:flex;flex-direction:column;gap:4px;font-size:13px;");
@@ -255,58 +330,72 @@ function mountSkills(plugin, host) {
         commitInput.type = "text";
         commitInput.setAttribute("aria-label", "已复制 Commit SHA");
         commitInput.placeholder = "留空则点击检查更新时视为基线未知";
-        commitInput.value = skill.source.commit || "";
+        commitInput.value = skill?.source.commit || "";
         commitLabel.appendChild(commitInput);
 
-        githubBox.appendChild(urlLabel);
-        githubBox.appendChild(commitLabel);
-
         const errorEl = el("div", "color:var(--text-error);font-size:12px;");
-        const syncModeUI = () => {
-            githubBox.style.display = modeSelect.value === "github" ? "flex" : "none";
-            errorEl.textContent = "";
-        };
-        modeSelect.onchange = syncModeUI;
-        syncModeUI();
-
-        modal.body.appendChild(modeRow);
-        modal.body.appendChild(githubBox);
+        modal.body.appendChild(urlLabel);
+        if (skill) modal.body.appendChild(commitLabel);
         modal.body.appendChild(errorEl);
 
         const cancelBtn = el("button", null, "取消");
         cancelBtn.onclick = () => modal.close();
-        const saveBtn = el("button", null, "保存");
+        const saveBtn = el("button", null, skill ? "保存" : "导入");
         saveBtn.className = "mod-cta";
         saveBtn.onclick = async () => {
             errorEl.textContent = "";
+            saveBtn.disabled = cancelBtn.disabled = true;
             try {
                 await exclusive(async () => {
-                    ensureState();
-                    const sourcesDoc = readSkillSources(stateRoot);
-                    if (modeSelect.value === "self") {
-                        delete sourcesDoc.skills[skill.sourceKey];
-                    } else {
-                        const parsed = parseSourceInput(urlInput.value, commitInput.value);
-                        parseGitHubUrl(parsed.url);
-                        sourcesDoc.skills[skill.sourceKey] = {
-                            kind: "github",
-                            url: parsed.url,
-                            commit: parsed.commit,
-                            updatedAt: new Date().toISOString(),
-                        };
+                    const commit = skill && urlInput.value.trim() !== skill.source.url &&
+                        commitInput.value === skill.source.commit ? "" : commitInput.value;
+                    const parsed = parseSourceInput(urlInput.value, commit);
+                    parseGitHubUrl(parsed.url);
+                    if (!skill) {
+                        const scope = destination();
+                        await importGitHubSkill(history, stateRoot, scope, parsed.url, plugin.settings);
+                        activeScopeKey = scope.key;
+                        return;
                     }
-                    writeSkillSources(stateRoot, sourcesDoc);
+                    const change = skillSourceChange(stateRoot, skill.sourceKey, {
+                        kind: "github",
+                        url: parsed.url,
+                        commit: parsed.commit,
+                        updatedAt: new Date().toISOString(),
+                    });
+                    replaceText(change.sourcesPath, change.afterSourcesText);
                     checkCache.delete(skill.sourceKey);
                 });
                 modal.close();
-                new Notice("已更新来源设置：" + skill.name);
+                if (skill) new Notice("已更新来源设置：" + skill.name);
                 await safeRefresh();
             } catch (error) {
                 errorEl.textContent = error.message || String(error);
+                saveBtn.disabled = cancelBtn.disabled = false;
             }
         };
         modal.footer.appendChild(cancelBtn);
         modal.footer.appendChild(saveBtn);
+    }
+
+    async function changeSkillType(select, skill) {
+        const next = select.value;
+        select.value = skill.source.kind;
+        if (next === skill.source.kind) return;
+        if (next === "github") {
+            openGitHubLinkModal(skill);
+            return;
+        }
+        try {
+            await exclusive(() => {
+                const change = skillSourceChange(stateRoot, skill.sourceKey, null);
+                if (change.sourcesPath) replaceText(change.sourcesPath, change.afterSourcesText);
+                checkCache.delete(skill.sourceKey);
+            });
+            await safeRefresh();
+        } catch (error) {
+            await showMessage("保存失败", error.message || String(error));
+        }
     }
 
     function openTargetsModal(isUser) {
@@ -572,65 +661,62 @@ function mountSkills(plugin, host) {
         parent.appendChild(card);
     }
 
-    function renderSkillCard(parent, scope, skill) {
-        const card = el("div",
-            "border:1px solid var(--background-modifier-border);border-radius:6px;padding:14px;margin-bottom:12px;");
-
-        const header = el("div", "display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;");
-        header.appendChild(el("div", "font-weight:600;font-size:14px;margin-right:auto;", skill.name));
-
-        const sourceBadge = el("span",
-            "font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid var(--background-modifier-border);" +
-            "background:var(--background-secondary);color:var(--text-muted);",
-            skill.source.kind === "github"
-                ? ("GitHub · " + (skill.source.commit ? skill.source.commit.slice(0, 7) : "基线未知"))
-                : "自建");
-        header.appendChild(sourceBadge);
-
+    function renderSkillRow(parent, scope, skill) {
+        const row = el("tr");
+        const info = el("th", SKILL_CELL_STYLE + "text-align:left;font-weight:400;min-width:140px;");
+        info.setAttribute("scope", "row");
+        info.appendChild(el("div", "font-weight:600;overflow-wrap:anywhere;", skill.name));
+        const summary = skill.description || "（无 description 说明）";
+        const description = el("div",
+            "max-width:30ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted);", summary);
+        description.title = summary;
+        info.appendChild(description);
         if (skill.issues.length) {
-            header.appendChild(el("span",
-                "font-size:11px;padding:2px 8px;border-radius:10px;color:var(--text-error);" +
-                "border:1px solid var(--text-error);",
-                "检查异常（" + skill.issues.length + "）"));
+            const issues = skill.issues.join("；");
+            const warning = el("details", "color:var(--text-error);");
+            warning.appendChild(el("summary", "cursor:pointer;", "检查异常（" + skill.issues.length + "）"));
+            warning.appendChild(el("div", "max-width:30ch;overflow-wrap:anywhere;", "问题：" + issues));
+            info.appendChild(warning);
         }
-        card.appendChild(header);
-
-        card.appendChild(el("div", "font-size:13px;line-height:1.55;margin-bottom:8px;",
-            skill.description || "（无 description 说明）"));
-
-        if (skill.issues.length) {
-            card.appendChild(el("div", "font-size:12px;color:var(--text-error);margin-bottom:8px;",
-                "问题：" + skill.issues.join("；")));
+        const checkMsg = formatCheckStatus(checkCache.get(skill.sourceKey));
+        if (checkMsg) {
+            const updateInfo = el("div",
+                "max-width:30ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-accent);", checkMsg);
+            updateInfo.title = checkMsg;
+            info.appendChild(updateInfo);
         }
+        row.appendChild(info);
 
-        if (skill.source.kind === "github") {
-            const upstream = el("div",
-                "font-family:var(--font-monospace);font-size:11px;color:var(--text-muted);" +
-                "word-break:break-all;margin-bottom:6px;",
-                "上游：" + skill.source.url);
-            card.appendChild(upstream);
-            const checkMsg = formatCheckStatus(checkCache.get(skill.sourceKey));
-            if (checkMsg) {
-                card.appendChild(el("div", "font-size:12px;color:var(--text-accent);margin-bottom:8px;", checkMsg));
-            }
-        }
+        const typeCell = el("td", SKILL_CELL_STYLE);
+        const typeSelect = skillTypeSelect("类型", skill.source.kind);
+        typeSelect.title = skill.name;
+        typeSelect.onchange = () => changeSkillType(typeSelect, skill);
+        typeCell.appendChild(typeSelect);
+        row.appendChild(typeCell);
+
+        const actionCell = el("td", SKILL_CELL_STYLE);
+        const actions = el("div", "display:flex;gap:4px;flex-wrap:wrap;min-width:135px;");
+        actionCell.appendChild(actions);
+        row.appendChild(actionCell);
 
         if (scope.harnessStates.length) {
-            const linksBox = el("div",
-                "display:flex;flex-direction:column;gap:6px;padding:8px 10px;margin-bottom:10px;" +
-                "border-radius:6px;background:var(--background-secondary);");
             for (const hState of scope.harnessStates) {
-                const line = el("div", "display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;");
-                line.appendChild(el("span", "font-weight:600;min-width:90px;", hState.name));
+                const cell = el("td", SKILL_CELL_STYLE);
+                const line = el("div", "display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:82px;");
+                cell.appendChild(line);
                 if (hState.status === "whole-dir-linked") {
-                    line.appendChild(el("span", "color:var(--text-muted);flex:1;", "整目录已链接（需先转换再单独分发）"));
+                    const status = el("span", "color:var(--text-muted);", "整目录已链接");
+                    status.title = "整目录已链接（需先转换再单独分发）";
+                    line.appendChild(status);
                 } else if (hState.status === "dir-conflict") {
-                    line.appendChild(el("span", "color:var(--text-error);flex:1;", "目录冲突：" + hState.reason));
+                    const status = el("span", "color:var(--text-error);", "目录冲突");
+                    status.title = hState.reason;
+                    line.appendChild(status);
                 } else {
                     const sState = hState.skills[skill.name];
                     if (sState.status === "linked") {
-                        line.appendChild(el("span", "color:var(--text-muted);flex:1;", "已链接"));
-                        const unlinkBtn = el("button", null, "取消链接");
+                        line.appendChild(el("span", "color:var(--text-muted);", "已链接"));
+                        const unlinkBtn = el("button", SKILL_ACTION_STYLE, "取消链接");
                         unlinkBtn.onclick = async () => {
                             unlinkBtn.disabled = true;
                             try {
@@ -644,8 +730,8 @@ function mountSkills(plugin, host) {
                         };
                         line.appendChild(unlinkBtn);
                     } else if (sState.status === "unlinked") {
-                        line.appendChild(el("span", "color:var(--text-muted);flex:1;", "未链接"));
-                        const linkBtn = el("button", null, "分发");
+                        line.appendChild(el("span", "color:var(--text-muted);", "未链接"));
+                        const linkBtn = el("button", SKILL_ACTION_STYLE, "分发");
                         linkBtn.onclick = async () => {
                             linkBtn.disabled = true;
                             try {
@@ -659,8 +745,10 @@ function mountSkills(plugin, host) {
                         };
                         line.appendChild(linkBtn);
                     } else if (sState.status === "broken") {
-                        line.appendChild(el("span", "color:var(--text-warning);flex:1;", sState.reason));
-                        const cleanBtn = el("button", null, "清理");
+                        const status = el("span", "color:var(--text-warning);", "失效");
+                        status.title = sState.reason;
+                        line.appendChild(status);
+                        const cleanBtn = el("button", SKILL_ACTION_STYLE, "清理");
                         cleanBtn.onclick = async () => {
                             cleanBtn.disabled = true;
                             try {
@@ -674,25 +762,23 @@ function mountSkills(plugin, host) {
                         };
                         line.appendChild(cleanBtn);
                     } else {
-                        line.appendChild(el("span", "color:var(--text-error);flex:1;", "冲突：" + sState.reason));
+                        line.appendChild(el("span", "color:var(--text-error);overflow-wrap:anywhere;max-width:24ch;", "冲突：" + sState.reason));
                     }
                 }
-                linksBox.appendChild(line);
+                row.appendChild(cell);
             }
-            card.appendChild(linksBox);
         }
 
-        const actions = el("div", "display:flex;gap:8px;flex-wrap:wrap;");
+        const viewBtn = el("button", SKILL_ACTION_STYLE, "查看 SKILL.md");
+        viewBtn.onclick = () => openViewSkillModal(skill);
+        actions.appendChild(viewBtn);
+
         if (skill.source.kind === "self") {
-            const editBtn = el("button", null, "编辑 SKILL.md");
+            const editBtn = el("button", SKILL_ACTION_STYLE, "编辑 SKILL.md");
             editBtn.onclick = () => openEditSkillModal(skill);
             actions.appendChild(editBtn);
         } else {
-            const viewBtn = el("button", null, "查看 SKILL.md");
-            viewBtn.onclick = () => openViewSkillModal(skill);
-            actions.appendChild(viewBtn);
-
-            const updateBtn = el("button", null, "更新");
+            const updateBtn = el("button", SKILL_ACTION_STYLE, "更新");
             updateBtn.className = "mod-cta";
             updateBtn.onclick = async () => {
                 updateBtn.disabled = true;
@@ -711,14 +797,33 @@ function mountSkills(plugin, host) {
                 }
             };
             actions.appendChild(updateBtn);
+            const sourceBtn = el("button", SKILL_ACTION_STYLE, "修改链接");
+            sourceBtn.onclick = () => openGitHubLinkModal(skill);
+            actions.appendChild(sourceBtn);
         }
 
-        const sourceBtn = el("button", null, "设置来源");
-        sourceBtn.onclick = () => openSourceModal(skill);
-        actions.appendChild(sourceBtn);
-        card.appendChild(actions);
+        parent.appendChild(row);
+    }
 
-        parent.appendChild(card);
+    function renderSkillTable(parent, scope) {
+        const scroll = el("div", "overflow-x:auto;max-width:100%;");
+        scroll.tabIndex = 0;
+        scroll.setAttribute("aria-label", "技能");
+        const table = el("table", "width:100%;border-collapse:collapse;table-layout:auto;margin:0;");
+        const head = el("thead");
+        const columns = el("tr");
+        for (const label of ["技能", "类型", "操作", ...scope.harnessStates.map(tool => tool.name)]) {
+            const header = el("th", SKILL_CELL_STYLE + "text-align:left;white-space:nowrap;", label);
+            header.setAttribute("scope", "col");
+            columns.appendChild(header);
+        }
+        head.appendChild(columns);
+        table.appendChild(head);
+        const body = el("tbody");
+        for (const skill of scope.skills) renderSkillRow(body, scope, skill);
+        table.appendChild(body);
+        scroll.appendChild(table);
+        parent.appendChild(scroll);
     }
 
     function renderInitError(error) {
@@ -773,7 +878,11 @@ function mountSkills(plugin, host) {
             const manageBtn = el("button", "flex-shrink:0;", "管理分发目标");
             manageBtn.type = "button";
             manageBtn.onclick = () => openTargetsModal(scope.kind === "user");
+            const createBtn = el("button", "flex-shrink:0;", "新建技能");
+            createBtn.type = "button";
+            createBtn.onclick = () => openCreateMenu(createBtn, scope);
             secHeader.appendChild(secMeta);
+            secHeader.appendChild(createBtn);
             secHeader.appendChild(manageBtn);
             pane.appendChild(secHeader);
 
@@ -786,9 +895,7 @@ function mountSkills(plugin, host) {
                     "当前目录中尚未发现含 SKILL.md 的技能子文件夹。");
                 pane.appendChild(emptyCard);
             } else {
-                for (const skill of scope.skills) {
-                    renderSkillCard(pane, scope, skill);
-                }
+                renderSkillTable(pane, scope);
             }
         }
 
