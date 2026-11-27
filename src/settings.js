@@ -10,7 +10,6 @@ const harnessTargets = {
 
 const defaultSkillUserTargets = {
     Claude: "~/.claude/skills",
-    Antigravity: "~/.gemini/config/skills",
 };
 
 const defaultSkillProjectTargets = {

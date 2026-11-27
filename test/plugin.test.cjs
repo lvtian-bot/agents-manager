@@ -866,7 +866,6 @@ test("设置页仅保留 GitHub 凭据变量校验和保存，且不覆写技能
         const { plugin } = await loadPlugin(app, { notices, save: value => saved.push(value) });
         assert.deepEqual({ ...plugin.settings.skillUserTargets }, {
             Claude: "~/.claude/skills",
-            Antigravity: "~/.gemini/config/skills",
         });
         assert.deepEqual({ ...plugin.settings.skillProjectTargets }, { Claude: ".claude/skills" });
         assert.equal(plugin.settings.githubCredentialVariable, "");
@@ -892,7 +891,6 @@ test("设置页仅保留 GitHub 凭据变量校验和保存，且不覆写技能
         assert.equal(saved.length, 1);
         assert.deepEqual({ ...saved[0].skillUserTargets }, {
             Claude: "~/.claude/skills",
-            Antigravity: "~/.gemini/config/skills",
         });
         assert.deepEqual({ ...saved[0].skillProjectTargets }, { Claude: ".claude/skills" });
         assert.equal(saved[0].githubCredentialVariable, "TEST_GH_TOKEN");
@@ -1048,19 +1046,19 @@ test("技能管理可在页面内弹窗维护用户级与项目级分发目标�
     sButton("管理分发目标").onclick();
     assert.ok(findElements(currentModal(), n => n.textContent?.includes("管理用户级技能分发目标")).length > 0);
     sButton("添加目标").onclick();
-    modalFields("工具名称")[2].value = "Claude";
-    modalFields("技能目录")[2].value = "~/dup-claude";
+    modalFields("工具名称")[1].value = "Claude";
+    modalFields("技能目录")[1].value = "~/dup-claude";
     await sButton("保存").onclick();
     assert.equal(saved.length, 0);
-    assert.equal(modalFields("工具名称")[2].getAttribute("aria-invalid"), "true");
+    assert.equal(modalFields("工具名称")[1].getAttribute("aria-invalid"), "true");
 
-    modalFields("工具名称")[2].value = "CustomTool";
-    modalFields("技能目录")[2].value = "relative/path";
+    modalFields("工具名称")[1].value = "CustomTool";
+    modalFields("技能目录")[1].value = "relative/path";
     await sButton("保存").onclick();
     assert.equal(saved.length, 0);
-    assert.equal(modalFields("技能目录")[2].getAttribute("aria-invalid"), "true");
+    assert.equal(modalFields("技能目录")[1].getAttribute("aria-invalid"), "true");
 
-    modalFields("技能目录")[2].value = "~/custom-skills";
+    modalFields("技能目录")[1].value = "~/custom-skills";
     await sButton("保存").onclick();
     assert.equal(saved.length, 1);
     assert.equal(saved[0].skillUserTargets.CustomTool, "~/custom-skills");
@@ -1108,7 +1106,7 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     const homeDir = path.join(fixtureDir, "home");
     const userSkillsRoot = path.join(homeDir, ".agents", "skills");
     const claudeUserSkills = path.join(homeDir, ".claude", "skills");
-    const antigravityUserSkills = path.join(homeDir, ".gemini", "config", "skills");
+    const customToolUserSkills = path.join(homeDir, ".custom-tool", "skills");
 
     const projARoot = path.join(fixtureDir, "proj-a");
     const projBRoot = path.join(fixtureDir, "proj-b");
@@ -1148,16 +1146,16 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
         "---\nname: proj-skill\ndescription: 项目A专属技能。\n---\n");
     fs.mkdirSync(path.join(projBRoot, ".agents", "skills"), { recursive: true });
 
-    // Claude 用户级预设为整目录链接；Antigravity 用户级存在冲突实体目录和失效链接
+    // Claude 用户级预设为整目录链接；CustomTool 用户级存在冲突实体目录和失效链接
     const linkType = process.platform === "win32" ? "junction" : "dir";
     fs.mkdirSync(path.dirname(claudeUserSkills), { recursive: true });
     fs.symlinkSync(userSkillsRoot, claudeUserSkills, linkType);
 
-    fs.mkdirSync(path.join(antigravityUserSkills, "conflict-skill"), { recursive: true });
-    write(path.join(antigravityUserSkills, "conflict-skill", "keep.txt"), "不能覆盖\n");
+    fs.mkdirSync(path.join(customToolUserSkills, "conflict-skill"), { recursive: true });
+    write(path.join(customToolUserSkills, "conflict-skill", "keep.txt"), "不能覆盖\n");
     const danglingTarget = path.join(userSkillsRoot, "old-removed");
     fs.mkdirSync(danglingTarget, { recursive: true });
-    fs.symlinkSync(danglingTarget, path.join(antigravityUserSkills, "old-removed"), linkType);
+    fs.symlinkSync(danglingTarget, path.join(customToolUserSkills, "old-removed"), linkType);
     fs.rmSync(danglingTarget, { recursive: true, force: true });
 
     const binaryBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
@@ -1175,6 +1173,10 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
             workSource: "Work模板.md",
             codeSource: "Code模板.md",
             targets: {},
+            skillUserTargets: {
+                Claude: "~/.claude/skills",
+                CustomTool: "~/.custom-tool/skills",
+            },
             githubCredentialVariable: "TEST_GH_TOKEN",
         },
         async fetch(url, req) {
@@ -1277,10 +1279,10 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     // 4. 失效链接清理 + 单技能分发 + 取消链接 + 一键分发 + 整目录转换
     assert.ok(skillsTextIncludes("失效链接（1）").length > 0);
     await sButton("清理").onclick();
-    assert.equal(fs.lstatSync(path.join(antigravityUserSkills, "old-removed"), { throwIfNoEntry: false }), undefined);
+    assert.equal(fs.lstatSync(path.join(customToolUserSkills, "old-removed"), { throwIfNoEntry: false }), undefined);
 
     await sButton("分发").onclick();
-    const alphaLink = path.join(antigravityUserSkills, "alpha-skill");
+    const alphaLink = path.join(customToolUserSkills, "alpha-skill");
     assert.ok(fs.lstatSync(alphaLink).isSymbolicLink());
 
     await sButton("取消链接").onclick();
@@ -1293,7 +1295,7 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     // 整目录链接的 Claude 不得向 ~/.agents/skills 内写入循环子链接
     assert.equal(fs.lstatSync(path.join(userSkillsRoot, "alpha-skill", "alpha-skill"), { throwIfNoEntry: false }), undefined);
     // 冲突实体目录保持原样
-    assert.equal(read(path.join(antigravityUserSkills, "conflict-skill", "keep.txt")), "不能覆盖\n");
+    assert.equal(read(path.join(customToolUserSkills, "conflict-skill", "keep.txt")), "不能覆盖\n");
 
     await sButton("撤销上次操作").onclick();
     await tick();
