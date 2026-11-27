@@ -1,5 +1,5 @@
 const fs = require("fs");
-const { Menu, Notice } = require("obsidian");
+const { Menu, Notice, ToggleComponent } = require("obsidian");
 const { readText, replaceText } = require("../instructions/storage");
 const { skillUserPath, skillProjectPath, required } = require("../settings");
 const {
@@ -22,7 +22,7 @@ const {
     convertWholeDirToPerSkill,
     distributeAllSkills,
 } = require("./links");
-const { parseGitHubUrl, checkGitHubUpdate, updateGitHubSkill, importGitHubSkill } = require("./github");
+const { parseGitHubUrl, createUpdateChecks, updateGitHubSkill, importGitHubSkill } = require("./github");
 
 const TAB_BASE_STYLE =
     "flex:1;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;box-shadow:none;" +
@@ -52,7 +52,9 @@ function mountSkills(plugin, host) {
     let stateRoot = null;
     let history = null;
     let scopes = [];
-    const checkCache = new Map();
+    const checks = plugin.skillUpdateChecks ??= createUpdateChecks(plugin.app);
+    const updateRows = [];
+    let manualCheckRunning = false;
 
     host.empty?.();
     const content = el("div", "flex:1;overflow:auto;padding:16px 18px;min-height:0;");
@@ -64,8 +66,7 @@ function mountSkills(plugin, host) {
 
     content.appendChild(el("div",
         "margin-bottom:14px;line-height:1.6;color:var(--text-muted);",
-        "扫描用户级 ~/.agents/skills、当前 Obsidian 仓库及已登记项目的 .agents/skills（无技能的目录不显示）。" +
-        "自建技能可直接编辑 SKILL.md；GitHub 复制技能点「更新」直接拉取最新文件。"));
+        "技能来自用户主目录、当前 Obsidian 库和已登记项目下的 .agents/skills。每个技能放在单独的子目录中，目录内须有 SKILL.md。"));
 
     function createModal(options) {
         const dialog = plugin.openDialog(options.title, options.onClose);
@@ -353,7 +354,7 @@ function mountSkills(plugin, host) {
                     parseGitHubUrl(parsed.url);
                     if (!skill) {
                         const scope = destination();
-                        await importGitHubSkill(history, stateRoot, scope, parsed.url, plugin.settings);
+                        await importGitHubSkill(history, stateRoot, scope, parsed.url, plugin.settings, checks);
                         activeScopeKey = scope.key;
                         return;
                     }
@@ -364,7 +365,6 @@ function mountSkills(plugin, host) {
                         updatedAt: new Date().toISOString(),
                     });
                     replaceText(change.sourcesPath, change.afterSourcesText);
-                    checkCache.delete(skill.sourceKey);
                 });
                 modal.close();
                 if (skill) new Notice("已更新来源设置：" + skill.name);
@@ -390,7 +390,6 @@ function mountSkills(plugin, host) {
             await exclusive(() => {
                 const change = skillSourceChange(stateRoot, skill.sourceKey, null);
                 if (change.sourcesPath) replaceText(change.sourcesPath, change.afterSourcesText);
-                checkCache.delete(skill.sourceKey);
             });
             await safeRefresh();
         } catch (error) {
@@ -661,6 +660,31 @@ function mountSkills(plugin, host) {
         parent.appendChild(card);
     }
 
+    function renderLinkSwitch(parent, scope, skill, harness, linked) {
+        const toggle = new ToggleComponent(parent).setValue(linked);
+        const control = toggle.toggleEl;
+        control.setAttribute("role", "switch");
+        control.setAttribute("aria-label", skill.name + " 链接到 " + harness.name);
+        control.setAttribute("aria-checked", String(linked));
+        toggle.onChange(async enable => {
+            control.setAttribute("aria-checked", String(enable));
+            if (enable === linked) return;
+            toggle.setDisabled(true);
+            try {
+                await exclusive(() => enable
+                    ? distributeSingleSkill(history, scope, skill, harness)
+                    : unlinkSingleSkill(history, skill, harness));
+                linked = enable;
+                new Notice(enable ? "已分发 " + skill.name + " → " + harness.name : "已取消链接：" + skill.name);
+            } catch (error) {
+                toggle.setValue(linked);
+                await showMessage(enable ? "分发失败" : "取消链接失败", error.message || String(error));
+            }
+            await safeRefresh();
+            toggle.setDisabled(false);
+        });
+    }
+
     function renderSkillRow(parent, scope, skill) {
         const row = el("tr");
         const info = el("th", SKILL_CELL_STYLE + "text-align:left;font-weight:400;min-width:140px;");
@@ -678,13 +702,6 @@ function mountSkills(plugin, host) {
             warning.appendChild(el("div", "max-width:30ch;overflow-wrap:anywhere;", "问题：" + issues));
             info.appendChild(warning);
         }
-        const checkMsg = formatCheckStatus(checkCache.get(skill.sourceKey));
-        if (checkMsg) {
-            const updateInfo = el("div",
-                "max-width:30ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-accent);", checkMsg);
-            updateInfo.title = checkMsg;
-            info.appendChild(updateInfo);
-        }
         row.appendChild(info);
 
         const typeCell = el("td", SKILL_CELL_STYLE);
@@ -695,14 +712,14 @@ function mountSkills(plugin, host) {
         row.appendChild(typeCell);
 
         const actionCell = el("td", SKILL_CELL_STYLE);
-        const actions = el("div", "display:flex;gap:4px;flex-wrap:wrap;min-width:135px;");
+        const actions = el("div", "display:flex;gap:4px;flex-wrap:wrap;");
         actionCell.appendChild(actions);
         row.appendChild(actionCell);
 
         if (scope.harnessStates.length) {
             for (const hState of scope.harnessStates) {
                 const cell = el("td", SKILL_CELL_STYLE);
-                const line = el("div", "display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:82px;");
+                const line = el("div", "display:flex;align-items:center;gap:4px;flex-wrap:wrap;");
                 cell.appendChild(line);
                 if (hState.status === "whole-dir-linked") {
                     const status = el("span", "color:var(--text-muted);", "整目录已链接");
@@ -714,36 +731,8 @@ function mountSkills(plugin, host) {
                     line.appendChild(status);
                 } else {
                     const sState = hState.skills[skill.name];
-                    if (sState.status === "linked") {
-                        line.appendChild(el("span", "color:var(--text-muted);", "已链接"));
-                        const unlinkBtn = el("button", SKILL_ACTION_STYLE, "取消链接");
-                        unlinkBtn.onclick = async () => {
-                            unlinkBtn.disabled = true;
-                            try {
-                                await exclusive(() => unlinkSingleSkill(history, skill, hState));
-                                new Notice("已取消链接：" + skill.name);
-                                await safeRefresh();
-                            } catch (error) {
-                                unlinkBtn.disabled = false;
-                                await showMessage("取消链接失败", error.message || String(error));
-                            }
-                        };
-                        line.appendChild(unlinkBtn);
-                    } else if (sState.status === "unlinked") {
-                        line.appendChild(el("span", "color:var(--text-muted);", "未链接"));
-                        const linkBtn = el("button", SKILL_ACTION_STYLE, "分发");
-                        linkBtn.onclick = async () => {
-                            linkBtn.disabled = true;
-                            try {
-                                await exclusive(() => distributeSingleSkill(history, scope, skill, hState));
-                                new Notice("已分发 " + skill.name + " → " + hState.name);
-                                await safeRefresh();
-                            } catch (error) {
-                                linkBtn.disabled = false;
-                                await showMessage("分发失败", error.message || String(error));
-                            }
-                        };
-                        line.appendChild(linkBtn);
+                    if (sState.status === "linked" || sState.status === "unlinked") {
+                        renderLinkSwitch(line, scope, skill, hState, sState.status === "linked");
                     } else if (sState.status === "broken") {
                         const status = el("span", "color:var(--text-warning);", "失效");
                         status.title = sState.reason;
@@ -769,31 +758,43 @@ function mountSkills(plugin, host) {
             }
         }
 
-        const viewBtn = el("button", SKILL_ACTION_STYLE, "查看 SKILL.md");
+        const viewBtn = el("button", SKILL_ACTION_STYLE, "查看");
         viewBtn.onclick = () => openViewSkillModal(skill);
         actions.appendChild(viewBtn);
 
         if (skill.source.kind === "self") {
-            const editBtn = el("button", SKILL_ACTION_STYLE, "编辑 SKILL.md");
+            const editBtn = el("button", SKILL_ACTION_STYLE, "编辑");
             editBtn.onclick = () => openEditSkillModal(skill);
             actions.appendChild(editBtn);
         } else {
             const updateBtn = el("button", SKILL_ACTION_STYLE, "更新");
-            updateBtn.className = "mod-cta";
+            const updateInfo = el("div", "max-width:30ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;");
+            info.appendChild(updateInfo);
+            let updating = false;
+            const updateStatus = () => {
+                const result = checks.status(skill.source);
+                const available = result?.status === "update-available";
+                updateBtn.className = available ? "mod-cta" : "";
+                updateBtn.disabled = updating || result?.status === "up-to-date";
+                updateInfo.textContent = updateInfo.title = formatCheckStatus(result);
+                updateInfo.hidden = !updateInfo.textContent;
+                updateInfo.style.color = available ? "var(--text-accent)" : "var(--text-muted)";
+            };
+            updateStatus();
+            updateRows.push(updateStatus);
             updateBtn.onclick = async () => {
+                if (updateBtn.disabled) return;
+                updating = true;
                 updateBtn.disabled = true;
                 try {
-                    const res = await exclusive(() => updateGitHubSkill(history, stateRoot, skill, plugin.settings));
-                    checkCache.set(skill.sourceKey, {
-                        status: "up-to-date",
-                        latestCommit: res.latestCommit,
-                        commitMessage: "",
-                    });
-                    new Notice("已更新 " + skill.name + "（" + res.latestCommit.slice(0, 7) + "）");
+                    const res = await exclusive(() => updateGitHubSkill(history, stateRoot, skill, plugin.settings, checks));
+                    if (res) new Notice("已更新 " + skill.name + "（" + res.latestCommit.slice(0, 7) + "）");
                     await safeRefresh();
                 } catch (error) {
-                    updateBtn.disabled = false;
                     await showMessage("更新失败", error.message || String(error));
+                } finally {
+                    updating = false;
+                    updateStatus();
                 }
             };
             actions.appendChild(updateBtn);
@@ -841,6 +842,7 @@ function mountSkills(plugin, host) {
 
     function render(nextScopes) {
         scopes = nextScopes;
+        updateRows.length = 0;
         const prevScroll = content.scrollTop || 0;
         const nextArea = el("div");
 
@@ -942,7 +944,7 @@ function mountSkills(plugin, host) {
         last.textContent = op ? "上次操作：" + op.label : "";
         undoButton.disabled = !op;
         const hasGitHub = scopes.some(scope => scope.skills.some(skill => skill.source.kind === "github"));
-        checkUpdatesButton.disabled = !stateRoot || !hasGitHub;
+        checkUpdatesButton.disabled = !stateRoot || !hasGitHub || manualCheckRunning;
         bulkButton.disabled = !stateRoot;
     };
 
@@ -956,35 +958,38 @@ function mountSkills(plugin, host) {
         }
     };
 
+    async function checkUpdates(force) {
+        const sources = scopes.flatMap(scope => scope.skills.map(skill => skill.source)).filter(source => source.kind === "github");
+        const urls = new Set(sources.map(source => source.url));
+        for (const url of urls) {
+            if (closed) return;
+            if (!force && checks.status({ url })?.latestCommit) continue;
+            try {
+                await checks.fetchLatest(url, plugin.settings);
+            } catch {
+                // 查询错误由对应技能行展示，其余来源继续检查。
+            }
+            if (closed) return;
+            for (const update of updateRows) update();
+        }
+        if (force && !closed) {
+            const results = sources.map(source => checks.status(source));
+            const updates = results.filter(result => result?.status === "update-available").length;
+            const failed = results.filter(result => result?.error).length;
+            const latest = results.length - updates - failed;
+            new Notice(`检查完成：${updates} 个有更新，${latest} 个无更新或待建基线` +
+                (failed ? `，${failed} 个失败` : ""));
+        }
+    }
+
     checkUpdatesButton.onclick = async () => {
-        if (!stateRoot || plugin.skillsBusy) return;
+        if (manualCheckRunning) return;
+        manualCheckRunning = true;
         checkUpdatesButton.disabled = true;
         try {
-            await exclusive(async () => {
-                let updates = 0;
-                let latest = 0;
-                let failed = 0;
-                for (const scope of scopes) {
-                    for (const skill of scope.skills) {
-                        if (skill.source.kind !== "github") continue;
-                        try {
-                            const res = await checkGitHubUpdate(skill.source, plugin.settings);
-                            checkCache.set(skill.sourceKey, res);
-                            if (res.status === "update-available") updates += 1;
-                            else latest += 1;
-                        } catch (error) {
-                            failed += 1;
-                            checkCache.set(skill.sourceKey, { error: error.message || String(error) });
-                        }
-                    }
-                }
-                new Notice(`检查完成：${updates} 个有更新，${latest} 个无更新或待建基线` +
-                    (failed ? `，${failed} 个失败` : ""));
-            });
-            await safeRefresh();
-        } catch (error) {
-            await showMessage("检查更新失败", error.message || String(error));
+            await checkUpdates(true);
         } finally {
+            manualCheckRunning = false;
             if (!closed) refreshHistory();
         }
     };
@@ -1028,13 +1033,14 @@ function mountSkills(plugin, host) {
     footer.appendChild(undoButton);
     footer.appendChild(bulkButton);
 
-    const ready = (async () => {
+    async function enterPanel() {
         await safeRefresh();
-    })();
+        if (!closed) void checkUpdates(false);
+    }
 
     return {
-        ready,
-        refresh: safeRefresh,
+        ready: enterPanel(),
+        refresh: enterPanel,
         destroy: () => { closed = true; },
         isBusy: () => Boolean(plugin.skillsBusy),
     };

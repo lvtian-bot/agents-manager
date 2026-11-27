@@ -69,8 +69,8 @@ async function checkResponseError(response, url) {
     throw new Error("GitHub 请求失败（HTTP " + response.status + "）：" + url);
 }
 
-async function fetchJson(url, headers) {
-    const response = await fetch(url, { headers });
+async function fetchJson(url, headers, cache = "default") {
+    const response = await fetch(url, { headers, cache });
     await checkResponseError(response, url);
     return response.json();
 }
@@ -103,7 +103,7 @@ async function fetchCommits(parsed, headers) {
     if (parsed.branch) params.set("sha", parsed.branch);
     if (parsed.subpath) params.set("path", parsed.subpath);
     const url = `https://api.github.com/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/commits?${params.toString()}`;
-    return fetchJson(url, headers);
+    return fetchJson(url, headers, "no-cache");
 }
 
 async function resolveSlashRef(parsed, headers) {
@@ -139,8 +139,8 @@ async function resolveSlashRef(parsed, headers) {
     return null;
 }
 
-async function checkGitHubUpdate(source, settings) {
-    let parsed = parseGitHubUrl(source.url);
+async function fetchLatestRevision(url, settings) {
+    let parsed = parseGitHubUrl(url);
     const { headers } = buildHeaders(settings);
     let commits = null;
     let firstError = null;
@@ -167,18 +167,56 @@ async function checkGitHubUpdate(source, settings) {
         throw new Error("GitHub 返回的提交记录缺少 SHA。");
     }
 
-    let status = "unknown-baseline";
-    if (source.commit) {
-        status = latestCommit.toLowerCase() === source.commit.toLowerCase() ? "up-to-date" : "update-available";
-    }
-
     return {
         latestCommit,
-        commitDate: latest?.commit?.committer?.date || latest?.commit?.author?.date || "",
         commitMessage: String(latest?.commit?.message || "").split("\n")[0],
-        status,
         parsed,
     };
+}
+
+const CHECK_MAX_AGE = 24 * 60 * 60 * 1000;
+
+function revisionStatus(commit, latestCommit) {
+    if (typeof commit !== "string" || !/^[0-9a-f]{7,40}$/i.test(commit)) return "unknown-baseline";
+    return latestCommit.toLowerCase().startsWith(commit.toLowerCase()) ? "up-to-date" : "update-available";
+}
+
+function createUpdateChecks(app) {
+    const results = new Map();
+    const pending = new Map();
+    const storageKey = url => "agents-manager:github-check:" + url;
+
+    function status(source) {
+        if (!results.has(source.url)) results.set(source.url, app.loadLocalStorage(storageKey(source.url)));
+        const entry = results.get(source.url);
+        if (entry?.error) return entry;
+        if (typeof entry?.latestCommit !== "string" || !entry.latestCommit) return null;
+        const age = Date.now() - entry?.checkedAt;
+        if (!Number.isFinite(age) || age < 0 || age >= CHECK_MAX_AGE) return null;
+        return { ...entry, status: revisionStatus(source.commit, entry.latestCommit) };
+    }
+
+    function fetchLatest(url, settings) {
+        if (pending.has(url)) return pending.get(url);
+        const request = fetchLatestRevision(url, settings).then(result => {
+            if (pending.get(url) === request) {
+                const entry = { latestCommit: result.latestCommit, commitMessage: result.commitMessage, checkedAt: Date.now() };
+                results.set(url, entry);
+                app.saveLocalStorage(storageKey(url), entry);
+            }
+            return result;
+        }, error => {
+            if (pending.get(url) === request) {
+                results.set(url, { error: error.message || String(error) });
+                app.saveLocalStorage(storageKey(url), null);
+            }
+            throw error;
+        }).finally(() => pending.delete(url));
+        pending.set(url, request);
+        return request;
+    }
+
+    return { status, fetchLatest, dispose: () => pending.clear() };
 }
 
 async function listEntriesViaContents(parsed, targetSha, dirPath, headers) {
@@ -261,20 +299,21 @@ async function downloadEntries(parsed, targetSha, entries, settings) {
     return files;
 }
 
-async function downloadGitHubSkill(source, settings) {
-    const check = await checkGitHubUpdate(source, settings);
+async function downloadGitHubSkill(url, check, settings) {
     const entries = await listTreeEntries(check.parsed, check.latestCommit, settings);
     const files = await downloadEntries(check.parsed, check.latestCommit, entries, settings);
     return { files, parsed: check.parsed, source: {
         kind: "github",
-        url: source.url,
+        url,
         commit: check.latestCommit,
         updatedAt: new Date().toISOString(),
     } };
 }
 
-async function updateGitHubSkill(history, stateRoot, skill, settings) {
-    const { files, source } = await downloadGitHubSkill(skill.source, settings);
+async function updateGitHubSkill(history, stateRoot, skill, settings, checks) {
+    const check = await checks.fetchLatest(skill.source.url, settings);
+    if (revisionStatus(skill.source.commit, check.latestCommit) === "up-to-date") return null;
+    const { files, source } = await downloadGitHubSkill(skill.source.url, check, settings);
     await history.apply({
         type: "github-update",
         label: "更新 " + skill.name + "（" + source.commit.slice(0, 7) + "）",
@@ -287,8 +326,9 @@ async function updateGitHubSkill(history, stateRoot, skill, settings) {
     return { latestCommit: source.commit, fileCount: files.length };
 }
 
-async function importGitHubSkill(history, stateRoot, scope, url, settings) {
-    const { files, parsed, source } = await downloadGitHubSkill({ url }, settings);
+async function importGitHubSkill(history, stateRoot, scope, url, settings, checks) {
+    const check = await checks.fetchLatest(url, settings);
+    const { files, parsed, source } = await downloadGitHubSkill(url, check, settings);
     const md = files.find(file => file.rel === "SKILL.md");
     const frontmatter = parseSkillFrontmatter(Buffer.from(md.base64, "base64").toString("utf8"));
     const fallback = parsed.subpath.split("/").at(-1) || parsed.repo;
@@ -298,7 +338,7 @@ async function importGitHubSkill(history, stateRoot, scope, url, settings) {
 
 module.exports = {
     parseGitHubUrl,
-    checkGitHubUpdate,
+    createUpdateChecks,
     updateGitHubSkill,
     importGitHubSkill,
 };

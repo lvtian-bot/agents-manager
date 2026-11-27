@@ -52,6 +52,9 @@ function findElements(element, predicate) {
 }
 
 async function loadPlugin(app, options = {}) {
+    const localStorage = options.localStorage || new Map();
+    app.loadLocalStorage = key => localStorage.get(key) ?? null;
+    app.saveLocalStorage = (key, value) => value ? localStorage.set(key, value) : localStorage.delete(key);
     const commands = [];
     const ribbonActions = [];
     const views = {};
@@ -100,6 +103,24 @@ async function loadPlugin(app, options = {}) {
             if (options.notices) options.notices.push(message);
             else assert.fail(message);
         }
+    }
+
+    class ToggleComponent {
+        constructor(parent) {
+            this.toggleEl = parent.createEl("label");
+            this.value = false;
+            this.toggleEl.onclick = () => {
+                if (!this.toggleEl.disabled) return this.change(!this.value);
+            };
+        }
+        change(value) {
+            if (this.value === value) return;
+            this.value = value;
+            return this.callback?.(value);
+        }
+        setValue(value) { this.change(value); return this; }
+        setDisabled(disabled) { this.toggleEl.disabled = disabled; return this; }
+        onChange(callback) { this.callback = callback; return this; }
     }
 
     class Setting {
@@ -182,7 +203,7 @@ async function loadPlugin(app, options = {}) {
                     }
                     showAtPosition() { options.menu(this.items); }
                 }
-                return { Notice, Plugin, Modal, ItemView, Setting, Menu, PluginSettingTab: class {}, FuzzySuggestModal: class {
+                return { Notice, Plugin, Modal, ItemView, Setting, Menu, ToggleComponent, PluginSettingTab: class {}, FuzzySuggestModal: class {
                     constructor(app) { this.app = app; }
                     open() { options.pick(this); }
                     onClose() {}
@@ -1541,7 +1562,7 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.ok(skillsTextIncludes("包含 agents/openai.yaml").length > 0);
 
     // 3. 自建技能编辑与撤销
-    sButton("编辑 SKILL.md").onclick();
+    sButton("编辑").onclick();
     const editor = findElements(plugin.body, node => node.tag === "textarea")[0];
     assert.match(editor.value, /初始正文/);
     editor.value = "---\nname: alpha-skill\ndescription: 修改后的 Alpha 说明。\n---\n\n# Alpha\n新版正文\n";
@@ -1559,13 +1580,35 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     await sButton("清理").onclick();
     assert.equal(fs.lstatSync(path.join(customToolUserSkills, "old-removed"), { throwIfNoEntry: false }), undefined);
 
-    await sButton("分发").onclick();
+    const linkSwitch = (name, tool) => findElements(skillsHost, node =>
+        node.getAttribute("role") === "switch" && node.getAttribute("aria-label") === name + " 链接到 " + tool)[0];
+    const alphaSwitch = () => linkSwitch("alpha-skill", "CustomTool");
     const alphaLink = path.join(customToolUserSkills, "alpha-skill");
+    assert.equal(linkSwitch("alpha-skill", "Claude"), undefined);
+    assert.equal(linkSwitch("conflict-skill", "CustomTool"), undefined);
+    assert.equal(alphaSwitch().getAttribute("aria-checked"), "false");
+    await alphaSwitch().onclick();
     assert.ok(fs.lstatSync(alphaLink).isSymbolicLink());
+    assert.equal(alphaSwitch().getAttribute("aria-checked"), "true");
 
-    await sButton("取消链接").onclick();
+    await alphaSwitch().onclick();
     assert.equal(fs.lstatSync(alphaLink, { throwIfNoEntry: false }), undefined);
     assert.equal(fs.existsSync(alphaSkillMd), true);
+    assert.equal(alphaSwitch().getAttribute("aria-checked"), "false");
+
+    // 列表打开后目标被占用，打开开关应失败，刷新后该行显示冲突。
+    write(alphaLink, "外部文件");
+    const staleSwitch = alphaSwitch();
+    const failedLink = staleSwitch.onclick();
+    await tick();
+    assert.equal(staleSwitch.disabled, true);
+    assert.equal(staleSwitch.getAttribute("aria-checked"), "false");
+    assert.ok(textIncludes("分发失败").length > 0);
+    sButton("关闭").onclick();
+    await failedLink;
+    assert.equal(read(alphaLink), "外部文件");
+    assert.equal(alphaSwitch(), undefined);
+    fs.unlinkSync(alphaLink);
 
     await sButton("一键分发").onclick();
     assert.ok(fs.lstatSync(alphaLink).isSymbolicLink());
@@ -1624,20 +1667,24 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
         "https://github.com/openclaw/gogcli/tree/1111111111111111111111111111111111111111/.agents/skills/gog @ 1111111111111111111111111111111111111111";
     await sButton("保存").onclick();
     assert.equal(typeFor("gog").value, "github");
-    assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "编辑 SKILL.md").length, 4);
-    assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "查看 SKILL.md").length, 5);
+    assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "编辑").length, 4);
+    assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "查看").length, 5);
     assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "修改链接").length, 1);
     assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "设置来源").length, 0);
     const gogRow = typeFor("gog").parent.parent;
     assert.equal(gogRow.children.length, 5);
     assert.equal(findElements(gogRow.children[2], node => node.textContent === "更新").length, 1);
-    assert.equal(findElements(gogRow.children[4], node => node.textContent === "分发").length, 1);
+    assert.equal(linkSwitch("gog", "CustomTool").closest("td"), gogRow.children[4]);
+    assert.notEqual(sButton("更新").className, "mod-cta");
 
     await sButton("检查更新").onclick();
     assert.ok(skillsTextIncludes("发现新版本：2222222").length > 0);
+    assert.equal(sButton("更新").className, "mod-cta");
 
     // 点击「更新」直接更新（无安全确认弹窗）
     await sButton("更新").onclick();
+    assert.notEqual(sButton("更新").className, "mod-cta");
+    assert.equal(sButton("更新").disabled, true);
     assert.match(read(path.join(userSkillsRoot, "gog", "SKILL.md")), /新版 Google CLI/);
     assert.deepEqual(fs.readFileSync(path.join(userSkillsRoot, "gog", "assets", "icon.bin")), binaryBytes);
     assert.equal(fs.existsSync(path.join(userSkillsRoot, "gog", ".github")), false);
@@ -1654,11 +1701,92 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.equal(fs.existsSync(path.join(userSkillsRoot, "gog", "assets", "icon.bin")), false);
     const restoredSources = JSON.parse(read(path.join(syncDir, "skills-sources.json")));
     assert.equal(restoredSources.skills["user/gog"].commit, "1111111111111111111111111111111111111111");
+    assert.equal(sButton("更新").className, "mod-cta");
+    assert.equal(sButton("更新").disabled, false);
 
     await plugin.closeWorkspace();
     assert.equal(plugin.body.children.length, 0);
 });
 
+
+test("技能更新先显示列表，打开时按来源复用一天的结果，手动检查可立即重查", { timeout: 8000 }, async (t) => {
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-skill-checks-"));
+    t.after(() => fs.rmSync(fixtureDir, { recursive: true, force: true }));
+    const vault = path.join(fixtureDir, "vault");
+    const sync = path.join(vault, ".obsidian", "plugins", "agents-manager", "sync");
+    fs.mkdirSync(sync, { recursive: true });
+    const old = "1".repeat(40), latest = "2".repeat(40);
+    const skills = {};
+    for (const [name, commit] of [["alpha", old], ["beta", latest.slice(0, 7)], ["gamma", ""]]) {
+        const dir = path.join(fixtureDir, "home", ".agents", "skills", name);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, "SKILL.md"), "---\nname: " + name + "\ndescription: 样例\n---\n");
+        skills["user/" + name] = { kind: "github", url: "https://github.com/example/skill", commit };
+    }
+    fs.writeFileSync(path.join(sync, "skills-sources.json"), JSON.stringify({ skills }));
+
+    const localStorage = new Map();
+    const notices = [];
+    let requests = 0, finishRequest;
+    const startup = () => loadPlugin({ vault: { adapter: { getBasePath: () => vault } } }, {
+        fixtureDir, localStorage, notices,
+        fetch(url) {
+            assert.match(url, /\/commits\?/);
+            requests++;
+            return new Promise(resolve => { finishRequest = resolve; });
+        },
+    });
+    const success = () => finishRequest({ ok: true, json: async () => [{ sha: latest }] });
+    const tick = () => new Promise(resolve => setImmediate(resolve));
+    let plugin = await startup();
+    const buttons = label => findElements(plugin.body, node => node.tag === "button" && node.textContent === label);
+    const colors = () => buttons("更新").map(button => button.className === "mod-cta");
+    await plugin.invoke("manage-skills");
+    assert.equal(requests, 1);
+    assert.deepEqual(colors(), [false, false, false]);
+    assert.ok(!plugin.plugin.skillsBusy);
+    const updateBeforeCheck = buttons("更新")[1].onclick();
+    const firstCheck = buttons("检查更新")[0].onclick();
+    assert.equal(requests, 1);
+    success();
+    await Promise.all([firstCheck, updateBeforeCheck]);
+    assert.deepEqual(colors(), [true, false, false]);
+    assert.deepEqual(buttons("更新").map(button => button.disabled), [false, true, false]);
+    await buttons("更新")[1].onclick();
+    assert.equal(requests, 1);
+    assert.equal(localStorage.size, 1);
+
+    await plugin.closeWorkspace();
+    plugin = await startup();
+    await plugin.invoke("manage-skills");
+    assert.equal(requests, 1);
+    assert.deepEqual(colors(), [true, false, false]);
+    const manual = buttons("检查更新")[0].onclick();
+    assert.equal(requests, 2);
+    finishRequest({ ok: false, status: 503, text: async () => "" });
+    await manual;
+    assert.deepEqual(colors(), [false, false, false]);
+    assert.ok(findElements(plugin.body, node => node.textContent?.startsWith("检查失败")).length);
+
+    await plugin.invoke("manage-skills");
+    assert.equal(requests, 3);
+    success();
+    await tick();
+    assert.deepEqual(colors(), [true, false, false]);
+    await plugin.closeWorkspace();
+    const [key, entry] = [...localStorage][0];
+    localStorage.set(key, { ...entry, checkedAt: Date.now() - 24 * 60 * 60 * 1000 });
+    plugin = await startup();
+    await plugin.invoke("manage-skills");
+    assert.equal(requests, 4);
+    assert.deepEqual(colors(), [false, false, false]);
+    success();
+    await tick();
+    assert.deepEqual(colors(), [true, false, false]);
+    assert.equal(notices.length, 2);
+    assert.equal(fs.existsSync(path.join(sync, "skills-last-operation.json")), false);
+    await plugin.closeWorkspace();
+});
 
 test("PR 审查回归：并发编辑不回滚外部改动、GitHub 更新保留权限与类型转换且拒绝内部软链接", async (t) => {
     const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-skills-review-"));
@@ -1762,7 +1890,7 @@ test("PR 审查回归：并发编辑不回滚外部改动、GitHub 更新保留�
     await plugin.invoke("manage-skills");
 
     // 1. 并发编辑：前置检查失败绝不能用旧内容覆盖外部修改，也不残留 pending 记录
-    sButton("编辑 SKILL.md").onclick();
+    sButton("编辑").onclick();
     const editor = findElements(plugin.body, node => node.tag === "textarea")[0];
     editor.value = "---\nname: self-skill\ndescription: 弹窗修改\n---\n弹窗内容\n";
     write(selfMd, "---\nname: self-skill\ndescription: 外部最新\n---\n外部最新正文\n");
@@ -1879,7 +2007,8 @@ test("PR 第二轮审查回归：链接改向撤销提示、源设置变更拦�
     // 2. 分发技能后外部把链接改为指向另一技能，撤销须弹确认；取消则保留新链接
     await plugin.invoke("manage-skills");
     const skillsHost = plugin.body.children[0].children[0].children[1].children[1];
-    await buttonIn(skillsHost, "分发").onclick();
+    const skillSwitch = findElements(skillsHost, node => node.getAttribute("aria-label") === "skill-one 链接到 Claude")[0];
+    await skillSwitch.onclick();
     const linkPath = path.join(claudeUserSkills, "skill-one");
     fs.unlinkSync(linkPath);
     fs.symlinkSync(altSkillDir, linkPath, process.platform === "win32" ? "junction" : "dir");
@@ -2352,7 +2481,7 @@ test("技能管理自动纳入当前 Obsidian 仓库技能，支持去重、分�
 
     // 2. 当前仓库自建编辑、GitHub 更新与按项目级目标一键分发 + 撤销
     sButton("知识库名称（2）").onclick();
-    sButton("编辑 SKILL.md", 1).onclick();
+    sButton("编辑", 1).onclick();
     const editor = findElements(plugin.body, node => node.tag === "textarea")[0];
     editor.value = "---\nname: vault-skill\ndescription: 仓库技能新说明\n---\n\n# Vault\n新内容\n";
     editor.oninput();
