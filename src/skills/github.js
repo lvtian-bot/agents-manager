@@ -1,6 +1,5 @@
-const { readText } = require("../instructions/storage");
-const { readSkillSources, sourcesFilePath } = require("./model");
-const { snapshotDirectoryFiles } = require("./links");
+const { parseSkillFrontmatter, skillCreationTarget, skillSourceChange } = require("./model");
+const { createSkill, snapshotDirectoryFiles } = require("./links");
 
 const EXCLUDED_SEGMENTS = new Set([".git", ".github", ".gitignore", "node_modules"]);
 
@@ -262,39 +261,44 @@ async function downloadEntries(parsed, targetSha, entries, settings) {
     return files;
 }
 
-async function updateGitHubSkill(history, stateRoot, skill, settings) {
-    const check = await checkGitHubUpdate(skill.source, settings);
+async function downloadGitHubSkill(source, settings) {
+    const check = await checkGitHubUpdate(source, settings);
     const entries = await listTreeEntries(check.parsed, check.latestCommit, settings);
-    const afterFiles = await downloadEntries(check.parsed, check.latestCommit, entries, settings);
-    const beforeFiles = snapshotDirectoryFiles(skill.dir);
-
-    const sourcesPath = sourcesFilePath(stateRoot);
-    const beforeSourcesText = readText(sourcesPath);
-    const sourcesDoc = readSkillSources(stateRoot);
-    sourcesDoc.skills[skill.sourceKey] = {
+    const files = await downloadEntries(check.parsed, check.latestCommit, entries, settings);
+    return { files, parsed: check.parsed, source: {
         kind: "github",
-        url: skill.source.url,
+        url: source.url,
         commit: check.latestCommit,
         updatedAt: new Date().toISOString(),
-    };
-    const afterSourcesText = JSON.stringify({ version: 1, skills: sourcesDoc.skills }, null, 2) + "\n";
+    } };
+}
 
+async function updateGitHubSkill(history, stateRoot, skill, settings) {
+    const { files, source } = await downloadGitHubSkill(skill.source, settings);
     await history.apply({
         type: "github-update",
-        label: "更新 " + skill.name + "（" + check.latestCommit.slice(0, 7) + "）",
+        label: "更新 " + skill.name + "（" + source.commit.slice(0, 7) + "）",
         skillDir: skill.dir,
-        beforeFiles,
-        afterFiles,
-        sourcesPath,
-        beforeSourcesText,
-        afterSourcesText,
+        beforeFiles: snapshotDirectoryFiles(skill.dir),
+        afterFiles: files,
+        ...skillSourceChange(stateRoot, skill.sourceKey, source),
     });
 
-    return { latestCommit: check.latestCommit, fileCount: afterFiles.length };
+    return { latestCommit: source.commit, fileCount: files.length };
+}
+
+async function importGitHubSkill(history, stateRoot, scope, url, settings) {
+    const { files, parsed, source } = await downloadGitHubSkill({ url }, settings);
+    const md = files.find(file => file.rel === "SKILL.md");
+    const frontmatter = parseSkillFrontmatter(Buffer.from(md.base64, "base64").toString("utf8"));
+    const fallback = parsed.subpath.split("/").at(-1) || parsed.repo;
+    const skill = skillCreationTarget(scope, frontmatter.name || fallback);
+    return createSkill(history, skill, files, skillSourceChange(stateRoot, skill.sourceKey, source));
 }
 
 module.exports = {
     parseGitHubUrl,
     checkGitHubUpdate,
     updateGitHubSkill,
+    importGitHubSkill,
 };
