@@ -8,6 +8,11 @@ const { runInNewContext } = require("node:vm");
 
 const bundle = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
 
+function fixtureModelSecrets(endpoint) {
+    const id = "agents-manager-custom-" + createHash("sha256").update(new URL(endpoint).href).digest("hex");
+    return new Map([[id, "test-key"]]);
+}
+
 class Element {
     constructor(tag) {
         this.tag = tag;
@@ -232,7 +237,7 @@ async function loadPlugin(app, options = {}) {
             }
             return require(name);
         },
-        process: { platform: process.platform, env: { TEST_MODEL_API_KEY: "test-key", ...(options.env || {}) } },
+        process: { platform: process.platform },
         console: { log() {}, error: (error) => assert.fail(String(error)) },
         fetch: options.fetch,
         Buffer, TextDecoder, URL, URLSearchParams, AbortController,
@@ -312,7 +317,8 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
         assert.equal(fields("模型")[0].value, "custom");
         assert.equal(fields("模型接口")[0].value, "https://legacy.example.org/v1/chat/completions");
         assert.equal(fields("模型名称")[0].value, "saved-model");
-        assert.equal(fields("凭据环境变量名")[0].value, "SAVED_API_KEY");
+        assert.equal(fields("凭据环境变量名").length, 0);
+        assert.equal(fields("API Key")[0].value, "");
         assert.equal(nodes(element => element.tag === "details").length, 0);
         assert.equal(button("保存设置"), undefined);
         fields("选择未匹配时使用的提示词")[0].onclick();
@@ -327,7 +333,7 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
         assert.equal(saved[1].targets.Codex, "~/.codex/AGENTS.md");
         assert.equal(saved[1].extra, 7);
         assert.equal(saved[1].model, "saved-model");
-        assert.equal(saved[1].credentialVariable, "SAVED_API_KEY");
+        assert.equal(Object.hasOwn(saved[1], "credentialVariable"), false);
         assert.equal(saved[1].endpoint, "https://example.org/v1/chat/completions");
         assert.deepEqual(notices, []);
         tab.display();
@@ -401,7 +407,8 @@ test("全新安装可在各指令同步标签页设置来源，模型连接留�
     const field = label => findElements(root, el => el.getAttribute("aria-label") === label)[0];
     assert.equal(field("模型").value, "");
     assert.equal(field("API Key").parent.parent.hidden, true);
-    for (const label of ["模型接口", "模型名称", "凭据环境变量名"]) assert.equal(field(label).value, "");
+    for (const label of ["模型接口", "模型名称"]) assert.equal(field(label).value, "");
+    assert.equal(field("凭据环境变量名"), undefined);
 
     const source = label => findElements(body, el => el.getAttribute("aria-label") === label)[0];
     const buttonIn = (container, label) =>
@@ -445,7 +452,7 @@ test("全新安装可在各指令同步标签页设置来源，模型连接留�
     assert.equal(findElements(body, el => /user-instructions-sync\.json|instruction-projects\.json/.test(el.textContent)).length, 0);
     assert.equal(saved[0].endpoint, "");
     assert.equal(saved[0].model, "");
-    assert.equal(saved[0].credentialVariable, "");
+    assert.equal(Object.hasOwn(saved[0], "credentialVariable"), false);
 
     plugin.app.workspace.getActiveFile = () => ({ path: "笔记.md" });
     await plugin.app.workspace.getLeavesOfType("agents-manager-workspace")[0].detach();
@@ -509,7 +516,7 @@ test("模型预设分别保存密钥，选择后向对应接口发起请求", as
     await invoke("summarize-note");
     assert.deepEqual(notices, ["请在模型设置中保存 API Key。"]);
     assert.equal(requests.length, 0);
-    save.onclick();
+    await save.onclick();
     assert.equal(key.value, "");
     assert.equal(key.placeholder, "••••••••");
     await invoke("summarize-note");
@@ -519,7 +526,7 @@ test("模型预设分别保存密钥，选择后向对应接口发起请求", as
     await invoke("translate-selection");
     assert.equal(requests.length, 1);
     key.value = "siliconflow-fixture";
-    save.onclick();
+    await save.onclick();
     await invoke("translate-selection");
     assert.equal(findElements(body, el => el.tag === "textarea").at(-1).value, "流式结果");
     await choose("deepseek");
@@ -537,6 +544,72 @@ test("模型预设分别保存密钥，选择后向对应接口发起请求", as
     assert.equal(secrets.size, 2);
     assert.equal(saved.length, 3);
     assert.doesNotMatch(JSON.stringify(saved), /deepseek-fixture|siliconflow-fixture/);
+});
+
+test("自定义连接使用 API Key，切换接口地址不会使用另一地址的密钥", async () => {
+    const endpoint = "https://example.org/v1/chat/completions";
+    const otherEndpoint = "https://example.org/other/chat/completions";
+    const secrets = new Map();
+    const saved = [];
+    const notices = [];
+    const requests = [];
+    const app = {
+        workspace: {
+            getActiveFile: () => ({ path: "笔记.md" }),
+            activeEditor: { editor: { getSelection: () => "Selected text", getValue: () => "笔记正文" } },
+        },
+    };
+    const { plugin, invoke } = await loadPlugin(app, {
+        secrets, notices, save: data => saved.push(data),
+        settings: { endpoint, model: "custom-model", credentialVariable: "OLD_API_KEY" },
+        async fetch(url, request) {
+            requests.push([url, request.headers.Authorization]);
+            return { ok: true, json: async () => ({ choices: [{ message: { content: "结果" } }] }) };
+        },
+    });
+    const tab = plugin.settingTab;
+    const root = tab.containerEl = new Element("div");
+    const field = label => findElements(root, el => el.getAttribute("aria-label") === label)[0];
+    tab.display();
+    assert.equal(field("模型").value, "custom");
+    assert.equal(field("API Key").parent.parent.hidden, false);
+    assert.equal(field("凭据环境变量名"), undefined);
+    const address = field("模型接口");
+    const key = field("API Key");
+    const save = findElements(root, el => el.tag === "button" && el.textContent === "保存")[0];
+    await invoke("summarize-note");
+    assert.deepEqual(notices, ["请在模型设置中保存 API Key。"]);
+    assert.equal(requests.length, 0);
+    key.value = "custom-key-fixture";
+    await save.onclick();
+    assert.equal(key.value, "");
+    assert.equal(key.placeholder, "••••••••");
+    await invoke("summarize-note");
+
+    key.value = "unsaved-key-fixture";
+    address.value = otherEndpoint;
+    await address.onchange();
+    assert.equal(key.value, "");
+    assert.equal(key.placeholder, "API Key");
+    await invoke("translate-selection");
+    assert.equal(requests.length, 1);
+    assert.equal(notices.at(-1), "请在模型设置中保存 API Key。");
+    key.value = "other-key-fixture";
+    await save.onclick();
+    await invoke("translate-selection");
+
+    address.value = "https://EXAMPLE.org:443/v1/chat/completions";
+    await address.onchange();
+    assert.equal(key.placeholder, "••••••••");
+    await invoke("summarize-note");
+    assert.deepEqual(requests, [
+        [endpoint, "Bearer custom-key-fixture"],
+        [otherEndpoint, "Bearer other-key-fixture"],
+        [endpoint, "Bearer custom-key-fixture"],
+    ]);
+    assert.equal(secrets.size, 2);
+    assert.equal(Object.hasOwn(saved.at(-1), "credentialVariable"), false);
+    assert.doesNotMatch(JSON.stringify(saved), /key-fixture/);
 });
 
 test("没有选区时翻译只提示，不发起模型请求", async () => {
@@ -592,10 +665,12 @@ test("AI 命令保持选区翻译、按类型总结及流式内容写回", async
             },
         };
 
+        const endpoint = "https://example.org/v1/chat/completions";
         const plugin = await loadPlugin(app, {
+            secrets: fixtureModelSecrets(endpoint),
             settings: {
-                endpoint: "https://example.org/v1/chat/completions",
-                model: "my-model", credentialVariable: "TEST_MODEL_API_KEY",
+                endpoint,
+                model: "my-model",
                 typeProperty: "文章类型",
                 ...(mode ? { summaryMode: mode, singleTemplate: "docs/prompts/文献总结-单独.md" } : {}),
                 templates: { 新闻报道: "docs/prompts/文献总结-新闻简讯.md", 观点视角: "docs/prompts/文献总结-观点视角.md", 知识教程: "docs/prompts/文献总结-知识教程.md" },
@@ -2743,10 +2818,10 @@ test("笔记 AI 处理覆盖请求取消、接口错误及生成期间切换或�
     const baseSettings = {
         endpoint: "https://example.org/v1/chat/completions",
         model: "my-model",
-        credentialVariable: "TEST_MODEL_API_KEY",
         summaryMode: "single",
         singleTemplate: "",
     };
+    const secrets = fixtureModelSecrets(baseSettings.endpoint);
 
     // 1. 请求取消：fetch 挂起期间点击「放弃」，应中止请求且无错误 Notice、不写回
     {
@@ -2769,7 +2844,7 @@ test("笔记 AI 处理覆盖请求取消、接口错误及生成期间切换或�
         };
         const plugin = await loadPlugin(app, {
             notices,
-            settings: baseSettings,
+            settings: baseSettings, secrets,
             fetch(_url, req) {
                 capturedSignal = req.signal;
                 return new Promise((resolve, reject) => {
@@ -2811,7 +2886,7 @@ test("笔记 AI 处理覆盖请求取消、接口错误及生成期间切换或�
         };
         const plugin = await loadPlugin(app, {
             notices,
-            settings: baseSettings,
+            settings: baseSettings, secrets,
             async fetch(_url, req) {
                 return {
                     ok: true,
@@ -2894,12 +2969,6 @@ test("笔记 AI 处理覆盖请求取消、接口错误及生成期间切换或�
                 json: async () => ({ choices: [{ message: { content: "   " } }] }),
             }),
         },
-        {
-            name: "缺少凭据环境变量",
-            expected: "MISSING_KEY_VAR",
-            settings: { ...baseSettings, credentialVariable: "MISSING_KEY_VAR" },
-            fetch: async () => assert.fail("缺少凭据时不应发起请求"),
-        },
     ];
 
     for (const item of errorCases) {
@@ -2912,7 +2981,7 @@ test("笔记 AI 处理覆盖请求取消、接口错误及生成期间切换或�
             vault: { async read() { return "正文"; } },
         }, {
             notices,
-            settings: item.settings || baseSettings,
+            settings: baseSettings, secrets,
             fetch: item.fetch,
         });
         await plugin.invoke("summarize-note");
@@ -2956,7 +3025,7 @@ test("笔记 AI 处理覆盖请求取消、接口错误及生成期间切换或�
         };
         const plugin = await loadPlugin(app, {
             notices,
-            settings: baseSettings,
+            settings: baseSettings, secrets,
             async fetch() {
                 if (scenario === "switch-file") currentFile = { path: "笔记B.md" };
                 else if (scenario === "edit-content") currentText = "生成期间被修改";
