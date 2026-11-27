@@ -644,12 +644,11 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
     const [alreadySynced] = findElements(plugin.body, (element) => element.textContent === "已同步");
     assert.equal(alreadySynced.tag, "div");
 
-    const [distribute] = findElements(plugin.body, (element) => element.textContent === "覆盖\n项目改动");
+    const [distribute] = findElements(plugin.body, (element) => element.textContent === "覆盖\n改动");
     await distribute.onclick();
     assert.equal(notices.at(-1), "已分发到 样例项目");
-    const syncedActions = findElements(plugin.body, element => ["回收\n项目改动", "覆盖\n项目改动", "逐行\n合并"].includes(element.textContent));
-    assert.equal(syncedActions.length, 3);
-    assert.ok(syncedActions.every(element => element.disabled && element.className !== "mod-cta"));
+    const [projectTitle] = findElements(plugin.body, element => element.textContent === "样例项目");
+    assert.deepEqual(findElements(projectTitle.parent.parent, node => node.tag === "button").map(b => b.textContent), ["×"]);
     assert.equal(read(target), newSection + "\n" + projectBody);
     assert.equal(read(path.join(stateFolder, "instruction-projects.json")), registry);
     assert.equal(read(userTarget), userBody);
@@ -673,7 +672,7 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
         return item;
     };
     await plugin.invoke("sync-instructions");
-    button("逐行\n合并").onclick();
+    button("审阅\n合并").onclick();
     const checkboxes = findElements(plugin.body, node => node.type === "checkbox");
     assert.equal(checkboxes.length, 2);
     for (const box of checkboxes) { box.checked = true; box.onchange(); }
@@ -704,7 +703,7 @@ test("指令命令沿用已有登记和基线，分发保留项目正文并备�
     const sourceBeforeFailure = read(typeSource);
     const targetBeforeFailure = read(target);
     const baselineBeforeFailure = read(typeStatePath);
-    const recover = button("回收\n项目改动");
+    const recover = button("回收\n改动");
     failSourceWrite = true;
     await recover.onclick();
     assert.equal(read(typeSource), sourceBeforeFailure);
@@ -929,19 +928,19 @@ test("同步面板操作后原地刷新保留标签页与滚动位置，并支�
     const projectActions = (name, recommended) => {
         const [title] = findElements(plugin.body, element => element.textContent === name);
         const buttons = findElements(title.parent.parent, element => element.tag === "button" && element.textContent !== "×");
-        assert.deepEqual(buttons.map(b => b.textContent), ["回收\n项目改动", "覆盖\n项目改动", "逐行\n合并"]);
+        assert.deepEqual(buttons.map(b => b.textContent), ["回收\n改动", "覆盖\n改动", "审阅\n合并"]);
         assert.deepEqual(buttons.filter(b => b.className === "mod-cta").map(b => b.textContent), [recommended]);
         assert.ok(buttons.every(b => !b.disabled));
         return buttons;
     };
 
     // 1. 回收项目A后，原地刷新，项目B立即可分发。
-    await projectActions("项目A", "回收\n项目改动")[0].onclick();
+    await projectActions("项目A", "回收\n改动")[0].onclick();
     assert.match(notices.at(-1), /已把项目工作规范回收进 Work 类型模板/);
     assertStayedInWorkTab("第二级：Work 类型（1 待处理）");
 
     // 2. 不关闭面板，直接把更新后的模板分发给项目B。
-    const [recycleB, , mergeB] = projectActions("项目B", "覆盖\n项目改动");
+    const [recycleB, , mergeB] = projectActions("项目B", "覆盖\n改动");
     mergeB.onclick();
     assert.ok(button("写回模板与项目"));
     button("取消").onclick();
@@ -951,7 +950,7 @@ test("同步面板操作后原地刷新保留标签页与滚动位置，并支�
     assert.equal(read(targetB), v1 + "\n" + bodyB);
     await button("撤销上次操作").onclick();
     assert.equal(read(workSourcePath), v1FromA + "\n" + templateTail);
-    await projectActions("项目B", "覆盖\n项目改动")[1].onclick();
+    await projectActions("项目B", "覆盖\n改动")[1].onclick();
     assert.equal(notices.at(-1), "已分发到 项目B");
     assert.equal(read(targetB), v1FromA + "\n" + bodyB);
     assertStayedInWorkTab("第二级：Work 类型");
@@ -963,8 +962,8 @@ test("同步面板操作后原地刷新保留标签页与滚动位置，并支�
     write(targetA, v2FromA + "\n" + bodyA);
     await button("刷新").onclick();
     assertStayedInWorkTab("第二级：Work 类型（2 待处理）");
-    const [, , mergeA] = projectActions("项目A", "逐行\n合并");
-    projectActions("项目B", "覆盖\n项目改动");
+    const [, , mergeA] = projectActions("项目A", "审阅\n合并");
+    projectActions("项目B", "覆盖\n改动");
 
     // 4. 行级对比合并项目A写回后，主面板原地刷新且待处理计数准确降至 1。
     mergeA.onclick();
@@ -995,42 +994,71 @@ test("同步面板操作后原地刷新保留标签页与滚动位置，并支�
 });
 
 
-test("首次接入、缺失和结构异常的项目也保留三个固定操作", async t => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "agents-project-actions-"));
+test("用户级、Work 和 Code 只显示可用操作，差异按钮顺序和推荐规则一致", async t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "agents-sync-actions-"));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     const sync = path.join(root, ".obsidian", "plugins", "agents-manager", "sync");
     fs.mkdirSync(sync, { recursive: true });
-    const template = "# Code 规范\n模板正文\n# 示例\n";
-    fs.writeFileSync(path.join(root, "模板.md"), template);
-    const cases = [
-        { name: "首次有差异", text: "# Code 规范\n本地正文\n# 项目\n", enabled: [true, true, true], primary: 2 },
-        { name: "待建立基线", text: template, enabled: [false, true, false], primary: 1 },
-        { name: "待创建文件", enabled: [false, true, false], primary: 1 },
-        { name: "已删除文件", enabled: [false, true, false], primary: 1 },
-        { name: "标题结构异常", text: "缺少一级标题\n", enabled: [false, false, false], primary: -1 },
-    ];
-    const projects = cases.map(({ name, text }) => {
-        const file = path.join(root, name, "AGENTS.md");
-        fs.mkdirSync(path.dirname(file));
-        if (text !== undefined) fs.writeFileSync(file, text);
-        return { type: "code", name, path: file };
-    });
+    const sourcePath = path.join(root, "模板.md");
+    const original = "# 规范\n原文\n# 示例\n";
+    const localEdit = original.replace("原文", "目标修改");
+    const sourceEdit = original.replace("原文", "来源修改");
+    fs.writeFileSync(sourcePath, original);
+    const projects = ["work", "code"].map(type => ({ type, name: type, path: path.join(root, type + ".md") }));
+    const targets = [{ name: "用户工具", path: path.join(root, "user.md") }, ...projects];
     fs.writeFileSync(path.join(sync, "instruction-projects.json"), JSON.stringify({ version: 1, projects }));
-    fs.writeFileSync(path.join(sync, "type-instructions-sync.json"), JSON.stringify({
-        version: 1, projects: [projects.find(project => project.name === "已删除文件")]
-    }));
     const plugin = await loadPlugin({
         workspace: { getActiveFile: () => null, getLeavesOfType: () => [] },
         vault: { adapter: { getBasePath: () => root } },
-    }, { fixtureDir: root, notices: [], settings: { userSource: "模板.md", codeSource: "模板.md" } });
+    }, { fixtureDir: root, notices: [], settings: {
+        userSource: "模板.md", workSource: "模板.md", codeSource: "模板.md", targets: { 用户工具: targets[0].path }
+    } });
     await plugin.invoke("sync-instructions");
-    for (const { name, enabled, primary } of cases) {
+    function actionsOf({ name }) {
         const [title] = findElements(plugin.body, node => node.textContent === name);
-        const buttons = findElements(title.parent.parent, node => node.tag === "button" && node.textContent !== "×");
-        assert.deepEqual(buttons.map(b => b.getAttribute("aria-label")), ["回收项目改动", "覆盖项目改动", "逐行合并"], name);
-        assert.deepEqual(buttons.map(b => !b.disabled), enabled, name);
-        assert.deepEqual(buttons.map(b => b.className === "mod-cta"), enabled.map((_, i) => i === primary), name);
+        const buttons = findElements(title.parent.parent, node => node.tag === "button");
+        assert.ok(buttons.some(b => b.textContent === "×"), name);
+        return buttons.filter(b => b.textContent !== "×");
     }
+    function checkActions(expected, recommended) {
+        for (const target of targets) {
+            const actions = actionsOf(target);
+            const label = b => b.getAttribute("aria-label") || b.textContent;
+            assert.deepEqual(actions.map(label), expected, target.name);
+            assert.deepEqual(actions.filter(b => b.className === "mod-cta").map(label), recommended ? [recommended] : [], target.name);
+            assert.ok(actions.every(b => !b.disabled), target.name);
+        }
+    }
+    const refresh = () => findElements(plugin.body, node => node.tag === "button" && node.textContent === "刷新")[0].onclick();
+    const differences = ["回收改动", "覆盖改动", "审阅合并"];
+    checkActions(["创建目标文件"], "创建目标文件");
+    for (const target of targets) fs.writeFileSync(target.path, localEdit);
+    await refresh();
+    checkActions(differences, "审阅合并");
+    for (const target of targets) fs.writeFileSync(target.path, original);
+    await refresh();
+    checkActions(["建立同步基线"], "建立同步基线");
+    for (const target of targets) await actionsOf(target)[0].onclick();
+    checkActions([]);
+
+    fs.writeFileSync(sourcePath, sourceEdit);
+    await refresh();
+    checkActions(differences, "覆盖改动");
+    for (const target of targets) fs.writeFileSync(target.path, localEdit);
+    await refresh();
+    checkActions(differences, "审阅合并");
+    fs.writeFileSync(sourcePath, original);
+    await refresh();
+    checkActions(differences, "回收改动");
+    for (const target of targets) fs.unlinkSync(target.path);
+    await refresh();
+    checkActions(["创建目标文件"], "创建目标文件");
+    for (const target of targets) await actionsOf(target)[0].onclick();
+    checkActions([]);
+
+    for (const project of projects) fs.writeFileSync(project.path, "缺少一级标题\n");
+    await refresh();
+    for (const project of projects) assert.deepEqual(actionsOf(project), []);
     await plugin.closeWorkspace();
 });
 
@@ -1996,11 +2024,11 @@ test("PR 第二轮审查回归：链接改向撤销提示、源设置变更拦�
     await plugin.invoke("sync-instructions");
     const instructionsHost = plugin.body.children[0].children[0].children[1].children[0];
     plugin.plugin.settings.userSource = "B.md";
-    await buttonIn(instructionsHost, "用目标版本回收进 用户指令源笔记").onclick();
+    await buttonIn(instructionsHost, "回收\n改动").onclick();
     assert.equal(read(path.join(vaultRoot, "A.md")), "源 A 内容\n");
     assert.equal(read(path.join(vaultRoot, "B.md")), "源 B 内容\n");
     assert.ok(findElements(instructionsHost, n => n.textContent?.includes("源笔记设置已变化")).length > 0);
-    await buttonIn(instructionsHost, "行级对比合并…").onclick();
+    await buttonIn(instructionsHost, "审阅\n合并").onclick();
     assert.ok(findElements(plugin.body, n => n.textContent?.includes("源笔记设置已变化")).length > 0);
     buttonIn(instructionsHost, "关闭").onclick();
 
