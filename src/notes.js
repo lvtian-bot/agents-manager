@@ -25,10 +25,7 @@ function requestHttps(endpoint, { method, headers, body, signal }) {
     });
 }
 
-async function requestText(connection, prompt, signal, onText) {
-    const { endpoint, model, credentialVariable, requestOptions } = connection;
-    const credential = credentialVariable ? process.env[credentialVariable] : connection.credential;
-    if (!credential) throw new Error("请在 Obsidian 的运行环境中设置 " + credentialVariable + "。");
+async function requestText({ endpoint, model, credential, requestOptions }, prompt, signal, onText) {
     const payload = {
         model, messages: [{ role: "user", content: prompt }],
         stream: true, temperature: 0.3, max_tokens: 2000,
