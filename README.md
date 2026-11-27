@@ -15,7 +15,7 @@
 
 1. 从 [GitHub Releases](https://github.com/lvtian-bot/agents-manager/releases) 下载同一版本的 `main.js` 和 `manifest.json`。
 2. 在知识库的 Obsidian 配置目录下创建 `plugins/agents-manager/`，放入这两个文件。配置目录默认为 `.obsidian`。
-3. 重新打开 Obsidian，在「设置 → 第三方插件」启用「Agents Manager」，然后在插件设置中填写指令源笔记和模板，并在「指令同步」「技能管理」面板中添加需要分发的 Harness 目标。
+3. 重新打开 Obsidian，在「设置 → 第三方插件」启用「Agents Manager」。在「指令同步」的用户级、Work 和 Code 标签页选择对应的源笔记或模板，并在「指令同步」「技能管理」面板中添加需要分发的 Harness 目标。
 4. 使用 AI 总结或翻译时，填写兼容 Chat Completions 的完整接口地址、模型名称和凭据环境变量名。三个字段初始为空。只使用指令同步或技能管理时，模型连接可整组留空。
 
 ## 本机文件与联网
