@@ -1,6 +1,8 @@
 const { ItemView } = require("obsidian");
 
 const WORKSPACE_VIEW_TYPE = "agents-manager-workspace";
+const WORKSPACE_VIEW_TITLE = "多 Agent 管理";
+const WORKSPACE_VIEW_ICON = "layers";
 
 const SECTION_DEFS = [
     { key: "instructions", label: "指令同步" },
@@ -33,11 +35,11 @@ class ManagerWorkspaceView extends ItemView {
     }
 
     getDisplayText() {
-        return "多 Agent 管理";
+        return WORKSPACE_VIEW_TITLE;
     }
 
     getIcon() {
-        return "layers";
+        return WORKSPACE_VIEW_ICON;
     }
 
     async onOpen() {
@@ -133,4 +135,4 @@ class ManagerWorkspaceView extends ItemView {
     }
 }
 
-module.exports = { WORKSPACE_VIEW_TYPE, ManagerWorkspaceView };
+module.exports = { WORKSPACE_VIEW_TYPE, WORKSPACE_VIEW_TITLE, WORKSPACE_VIEW_ICON, ManagerWorkspaceView };

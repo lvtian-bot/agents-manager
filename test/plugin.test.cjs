@@ -53,6 +53,7 @@ function findElements(element, predicate) {
 
 async function loadPlugin(app, options = {}) {
     const commands = [];
+    const ribbonActions = [];
     const views = {};
     const leaves = [];
     const body = new Element("body");
@@ -88,6 +89,7 @@ async function loadPlugin(app, options = {}) {
         async saveData(settings) { return options.save(settings); }
         registerView(type, factory) { views[type] = factory; }
         addSettingTab(tab) { this.settingTab = tab; }
+        addRibbonIcon(icon, title, callback) { ribbonActions.push({ icon, title, callback }); }
         addCommand(command) {
             commands.push(command);
         }
@@ -158,7 +160,7 @@ async function loadPlugin(app, options = {}) {
             leaves.push(leaf);
             return leaf;
         },
-        revealLeaf() {},
+        revealLeaf(leaf) { this.revealedLeaf = leaf; },
     };
 
     const module = { exports: {} };
@@ -209,6 +211,7 @@ async function loadPlugin(app, options = {}) {
     await plugin.onload();
     return {
         commands,
+        ribbonActions,
         body,
         plugin,
         invoke(id) {
@@ -1227,17 +1230,31 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     };
     const textIncludes = (snippet) => findElements(plugin.body, node => node.textContent?.includes(snippet));
 
-    // 1. 打开「技能管理」，验证同一标签页复用及栏目切换
-    await plugin.invoke("manage-skills");
-    assert.equal(plugin.plugin.app.workspace.getLeavesOfType("agents-manager-workspace").length, 1);
-    assert.equal(button("技能管理").getAttribute("aria-selected"), "true");
-
-    await plugin.invoke("sync-instructions");
-    assert.equal(plugin.plugin.app.workspace.getLeavesOfType("agents-manager-workspace").length, 1);
+    // 1. 工具栏和命令共用同一标签页，工具栏保留当前栏目
+    const { workspace } = plugin.plugin.app;
+    assert.equal(plugin.ribbonActions.length, 1);
+    const [ribbon] = plugin.ribbonActions;
+    await ribbon.callback();
+    const [leaf] = workspace.getLeavesOfType("agents-manager-workspace");
+    assert.ok(leaf);
+    assert.equal(workspace.revealedLeaf, leaf);
+    assert.equal(ribbon.title, leaf.view.getDisplayText());
+    assert.equal(ribbon.icon, leaf.view.getIcon());
     assert.equal(button("指令同步").getAttribute("aria-selected"), "true");
 
     await plugin.invoke("manage-skills");
-    assert.equal(plugin.plugin.app.workspace.getLeavesOfType("agents-manager-workspace").length, 1);
+    assert.equal(button("技能管理").getAttribute("aria-selected"), "true");
+    await ribbon.callback();
+    assert.deepEqual(workspace.getLeavesOfType("agents-manager-workspace"), [leaf]);
+    assert.equal(workspace.revealedLeaf, leaf);
+    assert.equal(button("技能管理").getAttribute("aria-selected"), "true");
+
+    await plugin.invoke("sync-instructions");
+    assert.deepEqual(workspace.getLeavesOfType("agents-manager-workspace"), [leaf]);
+    assert.equal(button("指令同步").getAttribute("aria-selected"), "true");
+
+    await plugin.invoke("manage-skills");
+    assert.deepEqual(workspace.getLeavesOfType("agents-manager-workspace"), [leaf]);
     assert.equal(button("技能管理").getAttribute("aria-selected"), "true");
 
     // 2. 验证扫描结果：项目A显示，项目B（空）隐藏，.hidden-dir 与 not-a-skill 不显示，规范问题准确报出
