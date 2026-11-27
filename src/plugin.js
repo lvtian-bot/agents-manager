@@ -81,6 +81,7 @@ module.exports = class AgentsManager extends Plugin {
     }
 
     onunload() {
+        this.skillUpdateChecks?.dispose();
         for (const modal of [...this.modals].reverse()) modal.close();
     }
 };

@@ -52,6 +52,9 @@ function findElements(element, predicate) {
 }
 
 async function loadPlugin(app, options = {}) {
+    const localStorage = options.localStorage || new Map();
+    app.loadLocalStorage = key => localStorage.get(key) ?? null;
+    app.saveLocalStorage = (key, value) => value ? localStorage.set(key, value) : localStorage.delete(key);
     const commands = [];
     const ribbonActions = [];
     const views = {};
@@ -100,6 +103,24 @@ async function loadPlugin(app, options = {}) {
             if (options.notices) options.notices.push(message);
             else assert.fail(message);
         }
+    }
+
+    class ToggleComponent {
+        constructor(parent) {
+            this.toggleEl = parent.createEl("label");
+            this.value = false;
+            this.toggleEl.onclick = () => {
+                if (!this.toggleEl.disabled) return this.change(!this.value);
+            };
+        }
+        change(value) {
+            if (this.value === value) return;
+            this.value = value;
+            return this.callback?.(value);
+        }
+        setValue(value) { this.change(value); return this; }
+        setDisabled(disabled) { this.toggleEl.disabled = disabled; return this; }
+        onChange(callback) { this.callback = callback; return this; }
     }
 
     class Setting {
@@ -182,7 +203,7 @@ async function loadPlugin(app, options = {}) {
                     }
                     showAtPosition() { options.menu(this.items); }
                 }
-                return { Notice, Plugin, Modal, ItemView, Setting, Menu, PluginSettingTab: class {}, FuzzySuggestModal: class {
+                return { Notice, Plugin, Modal, ItemView, Setting, Menu, ToggleComponent, PluginSettingTab: class {}, FuzzySuggestModal: class {
                     constructor(app) { this.app = app; }
                     open() { options.pick(this); }
                     onClose() {}
@@ -1570,12 +1591,15 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.equal(gogRow.children.length, 5);
     assert.equal(findElements(gogRow.children[2], node => node.textContent === "更新").length, 1);
     assert.equal(linkSwitch("gog", "CustomTool").closest("td"), gogRow.children[4]);
+    assert.notEqual(sButton("更新").className, "mod-cta");
 
     await sButton("检查更新").onclick();
     assert.ok(skillsTextIncludes("发现新版本：2222222").length > 0);
+    assert.equal(sButton("更新").className, "mod-cta");
 
     // 点击「更新」直接更新（无安全确认弹窗）
     await sButton("更新").onclick();
+    assert.notEqual(sButton("更新").className, "mod-cta");
     assert.match(read(path.join(userSkillsRoot, "gog", "SKILL.md")), /新版 Google CLI/);
     assert.deepEqual(fs.readFileSync(path.join(userSkillsRoot, "gog", "assets", "icon.bin")), binaryBytes);
     assert.equal(fs.existsSync(path.join(userSkillsRoot, "gog", ".github")), false);
@@ -1592,11 +1616,87 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.equal(fs.existsSync(path.join(userSkillsRoot, "gog", "assets", "icon.bin")), false);
     const restoredSources = JSON.parse(read(path.join(syncDir, "skills-sources.json")));
     assert.equal(restoredSources.skills["user/gog"].commit, "1111111111111111111111111111111111111111");
+    assert.equal(sButton("更新").className, "mod-cta");
 
     await plugin.closeWorkspace();
     assert.equal(plugin.body.children.length, 0);
 });
 
+
+test("技能更新先显示列表，打开时按来源复用一天的结果，手动检查可立即重查", { timeout: 8000 }, async (t) => {
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-skill-checks-"));
+    t.after(() => fs.rmSync(fixtureDir, { recursive: true, force: true }));
+    const vault = path.join(fixtureDir, "vault");
+    const sync = path.join(vault, ".obsidian", "plugins", "agents-manager", "sync");
+    fs.mkdirSync(sync, { recursive: true });
+    const old = "1".repeat(40), latest = "2".repeat(40);
+    const skills = {};
+    for (const [name, commit] of [["alpha", old], ["beta", latest.slice(0, 7)], ["gamma", ""]]) {
+        const dir = path.join(fixtureDir, "home", ".agents", "skills", name);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, "SKILL.md"), "---\nname: " + name + "\ndescription: 样例\n---\n");
+        skills["user/" + name] = { kind: "github", url: "https://github.com/example/skill", commit };
+    }
+    fs.writeFileSync(path.join(sync, "skills-sources.json"), JSON.stringify({ skills }));
+
+    const localStorage = new Map();
+    const notices = [];
+    let requests = 0, finishRequest;
+    const startup = () => loadPlugin({ vault: { adapter: { getBasePath: () => vault } } }, {
+        fixtureDir, localStorage, notices,
+        fetch(url) {
+            assert.match(url, /\/commits\?/);
+            requests++;
+            return new Promise(resolve => { finishRequest = resolve; });
+        },
+    });
+    const success = () => finishRequest({ ok: true, json: async () => [{ sha: latest }] });
+    const tick = () => new Promise(resolve => setImmediate(resolve));
+    let plugin = await startup();
+    const buttons = label => findElements(plugin.body, node => node.tag === "button" && node.textContent === label);
+    const colors = () => buttons("更新").map(button => button.className === "mod-cta");
+    await plugin.invoke("manage-skills");
+    assert.equal(requests, 1);
+    assert.deepEqual(colors(), [false, false, false]);
+    assert.ok(!plugin.plugin.skillsBusy);
+    const firstCheck = buttons("检查更新")[0].onclick();
+    assert.equal(requests, 1);
+    success();
+    await firstCheck;
+    assert.deepEqual(colors(), [true, false, false]);
+    assert.equal(localStorage.size, 1);
+
+    await plugin.closeWorkspace();
+    plugin = await startup();
+    await plugin.invoke("manage-skills");
+    assert.equal(requests, 1);
+    assert.deepEqual(colors(), [true, false, false]);
+    const manual = buttons("检查更新")[0].onclick();
+    assert.equal(requests, 2);
+    finishRequest({ ok: false, status: 503, text: async () => "" });
+    await manual;
+    assert.deepEqual(colors(), [false, false, false]);
+    assert.ok(findElements(plugin.body, node => node.textContent?.startsWith("检查失败")).length);
+
+    await plugin.invoke("manage-skills");
+    assert.equal(requests, 3);
+    success();
+    await tick();
+    assert.deepEqual(colors(), [true, false, false]);
+    await plugin.closeWorkspace();
+    const [key, entry] = [...localStorage][0];
+    localStorage.set(key, { ...entry, checkedAt: Date.now() - 24 * 60 * 60 * 1000 });
+    plugin = await startup();
+    await plugin.invoke("manage-skills");
+    assert.equal(requests, 4);
+    assert.deepEqual(colors(), [false, false, false]);
+    success();
+    await tick();
+    assert.deepEqual(colors(), [true, false, false]);
+    assert.equal(notices.length, 2);
+    assert.equal(fs.existsSync(path.join(sync, "skills-last-operation.json")), false);
+    await plugin.closeWorkspace();
+});
 
 test("PR 审查回归：并发编辑不回滚外部改动、GitHub 更新保留权限与类型转换且拒绝内部软链接", async (t) => {
     const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-skills-review-"));
