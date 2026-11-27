@@ -61,6 +61,7 @@ function mountSkills(plugin, host) {
     let scopes = [];
     const checks = plugin.skillUpdateChecks ??= createUpdateChecks(plugin.app);
     const updateRows = [];
+    const checkUpdateButtons = [];
     let manualCheckRunning = false;
 
     host.empty?.();
@@ -893,6 +894,7 @@ function mountSkills(plugin, host) {
     function renderInitError(error) {
         const nextArea = el("div");
         tabBar.empty();
+        checkUpdateButtons.length = 0;
         const card = el("div",
             "border:1px solid var(--background-modifier-border);border-radius:6px;padding:14px;");
         card.appendChild(el("div", "font-weight:600;margin-bottom:6px;", "技能管理不可用"));
@@ -907,6 +909,7 @@ function mountSkills(plugin, host) {
     function render(nextScopes) {
         scopes = nextScopes;
         updateRows.length = 0;
+        checkUpdateButtons.length = 0;
         const prevScroll = content.scrollTop || 0;
         const nextArea = el("div");
         const harnessColumns = scopes.reduce((count, scope) => Math.max(count, scope.harnessStates.length), 0);
@@ -936,7 +939,7 @@ function mountSkills(plugin, host) {
             const secHeader = el("div",
                 "margin:6px 0 10px;padding:8px 12px;background:var(--background-secondary);border-radius:6px;" +
                 "display:flex;align-items:center;gap:10px;flex-wrap:wrap;");
-            const secMeta = el("div", "flex:1;min-width:0;");
+            const secMeta = el("div", "flex:1 1 160px;min-width:0;");
             secMeta.appendChild(el("div", "font-weight:600;", scope.name));
             const sourcePath = el("div", TRUNCATE_STYLE +
                 "font-size:var(--am-font-secondary);color:var(--text-muted);margin-top:3px;font-family:var(--font-monospace);",
@@ -949,9 +952,16 @@ function mountSkills(plugin, host) {
             const createBtn = el("button", "flex-shrink:0;font-size:var(--am-font-control);", "新建技能");
             createBtn.type = "button";
             createBtn.onclick = () => openCreateMenu(createBtn, scope);
+            const checkBtn = el("button", "flex-shrink:0;font-size:var(--am-font-control);", "检查更新");
+            checkBtn.type = "button";
+            checkBtn.onclick = runManualUpdateCheck;
+            checkUpdateButtons.push(checkBtn);
+            const scopeActions = el("div", "display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;margin-left:auto;max-width:100%;");
+            scopeActions.appendChild(createBtn);
+            scopeActions.appendChild(manageBtn);
+            scopeActions.appendChild(checkBtn);
             secHeader.appendChild(secMeta);
-            secHeader.appendChild(createBtn);
-            secHeader.appendChild(manageBtn);
+            secHeader.appendChild(scopeActions);
             pane.appendChild(secHeader);
 
             renderHarnessSummary(pane, scope);
@@ -1001,18 +1011,21 @@ function mountSkills(plugin, host) {
     }
 
     const refreshButton = el("button", "font-size:var(--am-font-control);", "刷新");
-    const checkUpdatesButton = el("button", "font-size:var(--am-font-control);", "检查更新");
     const undoButton = el("button", "font-size:var(--am-font-control);", "撤销上次操作");
     const bulkButton = el("button", "font-size:var(--am-font-control);", "一键分发");
     listActions.appendChild(refreshButton);
-    listActions.appendChild(checkUpdatesButton);
+
+    function refreshUpdateButtons() {
+        const hasGitHub = scopes.some(scope => scope.skills.some(skill => skill.source.kind === "github"));
+        const disabled = !stateRoot || !hasGitHub || manualCheckRunning;
+        for (const button of checkUpdateButtons) button.disabled = disabled;
+    }
 
     refreshHistory = () => {
         const op = history ? history.latest() : null;
         last.textContent = op ? "上次操作：" + op.label : "";
         undoButton.disabled = !op;
-        const hasGitHub = scopes.some(scope => scope.skills.some(skill => skill.source.kind === "github"));
-        checkUpdatesButton.disabled = !stateRoot || !hasGitHub || manualCheckRunning;
+        refreshUpdateButtons();
         bulkButton.disabled = !stateRoot;
     };
 
@@ -1050,17 +1063,17 @@ function mountSkills(plugin, host) {
         }
     }
 
-    checkUpdatesButton.onclick = async () => {
+    async function runManualUpdateCheck() {
         if (manualCheckRunning) return;
         manualCheckRunning = true;
-        checkUpdatesButton.disabled = true;
+        refreshUpdateButtons();
         try {
             await checkUpdates(true);
         } finally {
             manualCheckRunning = false;
-            if (!closed) refreshHistory();
+            if (!closed) refreshUpdateButtons();
         }
-    };
+    }
 
     undoButton.onclick = async () => {
         if (!history) return;

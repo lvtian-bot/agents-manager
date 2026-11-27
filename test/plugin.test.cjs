@@ -1786,7 +1786,11 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     const [skillRecord, skillExplanation] = operationInfo.children;
     assert.equal(findElements(skillContent, n => n.textContent.startsWith("技能来自用户主目录")).length, 0);
     assert.match(skillExplanation.textContent, /^技能来自用户主目录/);
-    assert.deepEqual(skillContent.children[0].children[1].children.map(n => n.textContent), ["刷新", "检查更新"]);
+    assert.deepEqual(skillContent.children[0].children[1].children.map(n => n.textContent), ["刷新"]);
+    for (const pane of skillContent.children[1].children) {
+        const scopeActions = pane.children[0].children[1];
+        assert.deepEqual(scopeActions.children.map(n => n.textContent), ["新建技能", "管理分发目标", "检查更新"]);
+    }
     assert.deepEqual(skillActions.children.map(n => n.textContent), ["一键分发"]);
     assert.equal(skillRecord.children[1], sButton("撤销上次操作"));
     const warning = sButton("检查异常（4）");
@@ -1999,6 +2003,9 @@ test("技能更新先显示列表，打开时按来源复用一天的结果，�
     const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "agents-skill-checks-"));
     t.after(() => fs.rmSync(fixtureDir, { recursive: true, force: true }));
     const vault = path.join(fixtureDir, "vault");
+    const vaultSkill = path.join(vault, ".agents", "skills", "vault-skill");
+    fs.mkdirSync(vaultSkill, { recursive: true });
+    fs.writeFileSync(path.join(vaultSkill, "SKILL.md"), "---\nname: vault-skill\ndescription: 仓库样例\n---\n");
     const sync = path.join(vault, ".obsidian", "plugins", "agents-manager", "sync");
     fs.mkdirSync(sync, { recursive: true });
     const old = "1".repeat(40), latest = "2".repeat(40);
@@ -2031,10 +2038,16 @@ test("技能更新先显示列表，打开时按来源复用一天的结果，�
     assert.equal(requests, 1);
     assert.deepEqual(updateSkills(), []);
     assert.ok(!plugin.plugin.skillsBusy);
-    const firstCheck = buttons("检查更新")[0].onclick();
+    const checkButtons = buttons("检查更新");
+    assert.equal(checkButtons.length, 2);
+    assert.ok(checkButtons.every(button => !button.disabled));
+    const firstCheck = checkButtons[0].onclick();
+    assert.ok(checkButtons.every(button => button.disabled));
+    await checkButtons[1].onclick();
     assert.equal(requests, 1);
     success();
     await firstCheck;
+    assert.ok(checkButtons.every(button => !button.disabled));
     assert.deepEqual(updateSkills(), ["alpha"]);
     assert.ok(!buttons("更新")[0].disabled);
     assert.ok(findElements(plugin.body, node => node.textContent === "已是最新（2222222）").length);
