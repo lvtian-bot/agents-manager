@@ -1,14 +1,17 @@
 const { Notice } = require("obsidian");
+const { getModelConnection } = require("./models");
 
-async function requestText(settings, prompt, signal, onText) {
-    const credential = process.env[settings.credentialVariable];
-    if (!credential) throw new Error("请在 Obsidian 的运行环境中设置 " + settings.credentialVariable + "。");
+async function requestText(connection, prompt, signal, onText) {
+    const { endpoint, model, credentialVariable, requestOptions } = connection;
+    const credential = credentialVariable ? process.env[credentialVariable] : connection.credential;
+    if (!credential) throw new Error("请在 Obsidian 的运行环境中设置 " + credentialVariable + "。");
     const payload = {
-        model: settings.model, messages: [{ role: "user", content: prompt }],
+        model, messages: [{ role: "user", content: prompt }],
         stream: true, temperature: 0.3, max_tokens: 2000,
+        ...requestOptions,
     };
-    if (new URL(settings.endpoint).hostname === "api.siliconflow.cn") payload.enable_thinking = false;
-    const response = await fetch(settings.endpoint, {
+    if (new URL(endpoint).hostname === "api.siliconflow.cn") payload.enable_thinking = false;
+    const response = await fetch(endpoint, {
         method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + credential },
         body: JSON.stringify(payload), signal,
     });
@@ -57,9 +60,7 @@ async function editWithAI(plugin, action) {
     const originalSelection = editor?.getSelection() || "";
     const translating = action === "translation";
     if (translating && !originalSelection.trim()) throw new Error("请先选中要翻译的外文。");
-    if (!settings.endpoint) throw new Error("请填写完整的模型接口地址。");
-    if (!settings.model) throw new Error("此项不能为空。");
-    if (!settings.credentialVariable) throw new Error("请填写有效的环境变量名。");
+    const connection = getModelConnection(app, settings);
     const from = editor?.getCursor?.("from");
     const to = editor?.getCursor?.("to");
     const original = editor?.getValue?.() ?? await app.vault.read(file);
@@ -125,7 +126,7 @@ async function editWithAI(plugin, action) {
     replace.disabled = insert.disabled = true;
     const timer = setTimeout(() => controller.abort(), 60000);
     try {
-        await requestText(settings, prompt, controller.signal, delta => { if (!closed) preview.value += delta; });
+        await requestText(connection, prompt, controller.signal, delta => { if (!closed) preview.value += delta; });
         if (!preview.value.trim()) throw new Error("模型未返回内容。");
     } catch (error) {
         if (closed) return;

@@ -53,6 +53,11 @@ function findElements(element, predicate) {
 
 async function loadPlugin(app, options = {}) {
     const localStorage = options.localStorage || new Map();
+    const secrets = options.secrets || new Map();
+    app.secretStorage = {
+        getSecret: id => secrets.get(id) ?? null,
+        setSecret: (id, value) => secrets.set(id, value),
+    };
     app.loadLocalStorage = key => localStorage.get(key) ?? null;
     app.saveLocalStorage = (key, value) => value ? localStorage.set(key, value) : localStorage.delete(key);
     const commands = [];
@@ -286,60 +291,67 @@ test("设置页保留旧配置，可选笔记、增删行，并在出错时保�
         const nodes = predicate => findElements(root, predicate);
         const fields = label => nodes(element => element.getAttribute("aria-label") === label);
         const button = text => nodes(element => element.tag === "button" && element.textContent === text)[0];
-        const save = () => button("保存设置").onclick();
+        const change = (label, value, index = 0) => {
+            const input = fields(label)[index];
+            input.value = value;
+            return input.onchange();
+        };
         tab.display();
         assert.equal(nodes(element => element.textContent === "用户指令目标").length, 0);
-        assert.equal(nodes(element => element.tag === "button" && element.textContent === "添加目标").length, 0);
+        assert.equal(button("添加目标"), undefined);
         assert.equal(fields("移除 Claude").length, 0);
         assert.equal(fields("提示词笔记")[0].value, "旧模板.md");
         assert.equal(fields("总结模式")[0].value, "multiple");
+        assert.equal(fields("模型")[0].value, "custom");
         assert.equal(fields("模型接口")[0].value, "https://legacy.example.org/v1/chat/completions");
         assert.equal(fields("模型名称")[0].value, "saved-model");
         assert.equal(fields("凭据环境变量名")[0].value, "SAVED_API_KEY");
         assert.equal(nodes(element => element.tag === "details").length, 0);
+        assert.equal(button("保存设置"), undefined);
         fields("选择未匹配时使用的提示词")[0].onclick();
-        assert.equal(fields("未匹配时使用的提示词")[0].value, "模板/摘要.md");
-        fields("模型接口")[0].value = "无效地址";
-        await save();
+        await plugin._settingsQueue;
+        assert.equal(plugin.settings.defaultTemplate, "模板/摘要.md");
+        await change("模型接口", "无效地址");
         assert.equal(fields("模型接口")[0].getAttribute("aria-invalid"), "true");
-        assert.ok(fields("模型接口")[0].focused);
-        assert.equal(saved.length, 0);
-        assert.equal(plugin.settings.defaultTemplate, "");
-        fields("模型接口")[0].value = "https://example.org/v1/chat/completions";
-        await save();
         assert.equal(saved.length, 1);
-        assert.equal(saved[0].targets.Codex, "~/.codex/AGENTS.md");
-        assert.equal(saved[0].targets.Claude, "~/.claude/CLAUDE.md");
-        assert.equal(saved[0].extra, 7);
-        assert.equal(saved[0].model, "saved-model");
-        assert.equal(saved[0].credentialVariable, "SAVED_API_KEY");
-        assert.deepEqual(notices, ["设置已保存。"]);
+        assert.equal(plugin.settings.endpoint, "https://legacy.example.org/v1/chat/completions");
+        await change("模型接口", "https://example.org/v1/chat/completions");
+        assert.equal(saved.length, 2);
+        assert.equal(saved[1].targets.Codex, "~/.codex/AGENTS.md");
+        assert.equal(saved[1].extra, 7);
+        assert.equal(saved[1].model, "saved-model");
+        assert.equal(saved[1].credentialVariable, "SAVED_API_KEY");
+        assert.equal(saved[1].endpoint, "https://example.org/v1/chat/completions");
+        assert.deepEqual(notices, []);
         tab.display();
         assert.equal(fields("未匹配时使用的提示词")[0].value, "模板/摘要.md");
         plugin.settings.targets = { Codex: "~/legacy.md", 自定义: "~/custom.md" };
         tab.display();
-        await save();
+        await change("总结模式", "single");
         assert.deepEqual({ ...saved.at(-1).targets }, { Codex: "~/legacy.md", 自定义: "~/custom.md" });
-        const choose = value => {
-            const mode = fields("总结模式")[0];
-            mode.value = value;
-            mode.onchange();
-        };
-        choose("single");
-        fields("总结提示词")[0].value = "单独.md";
-        await save();
+        await change("总结提示词", "单独.md");
         tab.display();
         assert.equal(fields("总结模式")[0].value, "single");
-        choose("multiple");
-        fields("匹配属性")[0].value = "文章类型";
+        await change("总结模式", "multiple");
+        await change("匹配属性", "文章类型");
         button("添加规则").onclick();
-        fields("属性值").at(-1).value = "访谈";
-        fields("提示词笔记").at(-1).value = "访谈摘要.md";
-        await save();
+        await change("属性值", "访谈", 1);
+        assert.equal(Object.hasOwn(plugin.settings.templates, "访谈"), false);
+        await change("提示词笔记", "../库外.md", 1);
+        assert.equal(fields("提示词笔记")[1].getAttribute("aria-invalid"), "true");
+        await change("提示词笔记", "访谈摘要.md", 1);
+        await change("属性值", "访谈", 0);
+        assert.equal(fields("属性值")[0].getAttribute("aria-invalid"), "true");
         assert.equal(plugin.settings.typeProperty, "文章类型");
         assert.equal(plugin.settings.templates.访谈, "访谈摘要.md");
         assert.equal(plugin.settings.defaultTemplate, "模板/摘要.md");
         assert.equal(plugin.settings.singleTemplate, "单独.md");
+        await Promise.all([
+            change("属性值", "访谈记录", 1),
+            change("提示词笔记", "访谈记录.md", 1),
+        ]);
+        await button("移除").onclick();
+        assert.deepEqual({ ...plugin.settings.templates }, { 访谈记录: "访谈记录.md" });
     } finally {
         fs.rmSync(fixtureDir, { recursive: true, force: true });
     }
@@ -380,7 +392,8 @@ test("全新安装可在各指令同步标签页设置来源，模型连接留�
     const root = tab.containerEl = new Element("div");
     tab.display();
     const field = label => findElements(root, el => el.getAttribute("aria-label") === label)[0];
-    const [save] = findElements(root, el => el.tag === "button" && el.textContent === "保存设置");
+    assert.equal(field("模型").value, "");
+    assert.equal(field("API Key").parent.parent.hidden, true);
     for (const label of ["模型接口", "模型名称", "凭据环境变量名"]) assert.equal(field(label).value, "");
 
     const source = label => findElements(body, el => el.getAttribute("aria-label") === label)[0];
@@ -427,22 +440,80 @@ test("全新安装可在各指令同步标签页设置来源，模型连接留�
     assert.equal(saved[0].model, "");
     assert.equal(saved[0].credentialVariable, "");
 
-    field("模型接口").value = "https://example.org/v1/chat/completions";
-    await save.onclick();
-    assert.equal(saved.length, 3);
-    assert.equal(field("模型名称").getAttribute("aria-invalid"), "true");
-    field("模型接口").value = "";
-    await save.onclick();
-    assert.equal(saved[3].userSource, "我的指令.md");
-    assert.equal(saved[3].workSource, "Work模板.md");
-    assert.equal(saved[3].codeSource, "Code模板.md");
     plugin.app.workspace.getActiveFile = () => ({ path: "笔记.md" });
     await plugin.app.workspace.getLeavesOfType("agents-manager-workspace")[0].detach();
 
     await invoke("summarize-note");
     await invoke("translate-selection");
-    assert.deepEqual(notices, ["设置已保存。", "请填写完整的模型接口地址。", "请填写完整的模型接口地址。"]);
+    assert.deepEqual(notices, ["请在模型设置中选择模型。", "请在模型设置中选择模型。"]);
     assert.equal(body.children.length, 0);
+});
+
+test("模型预设分别保存密钥，选择后向对应接口发起请求", async () => {
+    const secrets = new Map();
+    const notices = [];
+    const requests = [];
+    const saved = [];
+    const app = {
+        workspace: {
+            getActiveFile: () => ({ path: "笔记.md" }),
+            activeEditor: { editor: { getSelection: () => "Selected text", getValue: () => "笔记正文" } },
+        },
+    };
+    const options = {
+        secrets, notices, save: settings => saved.push(settings),
+        async fetch(url, request) {
+            requests.push({ url, authorization: request.headers.Authorization, payload: JSON.parse(request.body) });
+            return { ok: true, json: async () => ({ choices: [{ message: { content: "结果" } }] }) };
+        },
+    };
+    const { plugin, invoke } = await loadPlugin(app, options);
+    const tab = plugin.settingTab;
+    const root = tab.containerEl = new Element("div");
+    tab.display();
+    const find = predicate => findElements(root, predicate)[0];
+    const model = find(el => el.getAttribute("aria-label") === "模型");
+    const key = find(el => el.getAttribute("aria-label") === "API Key");
+    const save = find(el => el.tag === "button" && el.textContent === "保存");
+    const choose = async value => {
+        model.value = value;
+        await model.onchange();
+    };
+    assert.deepEqual(model.children.map(option => option.textContent), ["请选择模型", "DeepSeek 官方", "硅基流动", "自定义连接"]);
+    assert.equal(key.getAttribute("type"), "password");
+    await choose("deepseek");
+    assert.equal(saved.at(-1).modelConnection, "deepseek");
+    key.value = "  deepseek-fixture  ";
+    await invoke("summarize-note");
+    assert.deepEqual(notices, ["请在模型设置中保存 API Key。"]);
+    assert.equal(requests.length, 0);
+    save.onclick();
+    assert.equal(key.value, "");
+    assert.equal(key.placeholder, "••••••••");
+    await invoke("summarize-note");
+
+    await choose("siliconflow");
+    assert.equal(key.placeholder, "API Key");
+    await invoke("translate-selection");
+    assert.equal(requests.length, 1);
+    key.value = "siliconflow-fixture";
+    save.onclick();
+    await invoke("translate-selection");
+    await choose("deepseek");
+    assert.equal(key.placeholder, "••••••••");
+    const reopened = await loadPlugin(app, { ...options, settings: JSON.parse(JSON.stringify(saved.at(-1))) });
+    await reopened.invoke("summarize-note");
+
+    assert.deepEqual(requests.map(({ url, authorization, payload }) => [url, authorization, payload.model]), [
+        ["https://api.deepseek.com/chat/completions", "Bearer deepseek-fixture", "deepseek-flash"],
+        ["https://api.siliconflow.cn/v1/chat/completions", "Bearer siliconflow-fixture", "deepseek-ai/DeepSeek-V4.1-Flash"],
+        ["https://api.deepseek.com/chat/completions", "Bearer deepseek-fixture", "deepseek-flash"],
+    ]);
+    assert.equal(requests[0].payload.thinking.type, "disabled");
+    assert.equal(requests[1].payload.enable_thinking, false);
+    assert.equal(secrets.size, 2);
+    assert.equal(saved.length, 3);
+    assert.doesNotMatch(JSON.stringify(saved), /deepseek-fixture|siliconflow-fixture/);
 });
 
 test("没有选区时翻译只提示，不发起模型请求", async () => {
@@ -1083,23 +1154,21 @@ test("设置页直接展示两组设置，保存时清理旧 GitHub 凭据字段
         const root = tab.containerEl = new Element("div");
         tab.display();
         const nodes = predicate => findElements(root, predicate);
-        const button = (text, index = 0) => nodes(el => el.tag === "button" && el.textContent === text)[index];
         const fields = label => nodes(el => el.getAttribute("aria-label") === label);
-
-        assert.deepEqual(nodes(el => el.tag === "h3").map(el => el.textContent), ["AI 总结笔记", "模型连接"]);
+        assert.deepEqual(nodes(el => el.tag === "h3").map(el => el.textContent), ["AI 总结笔记", "模型设置"]);
         assert.equal(nodes(el => el.tag === "details").length, 0);
         assert.equal(fields("技能目录").length, 0);
         assert.equal(fields("相对技能目录").length, 0);
         assert.equal(fields("GitHub 凭据环境变量名").length, 0);
-        await button("保存设置").onclick();
+        const mode = fields("总结模式")[0];
+        mode.value = "multiple";
+        await mode.onchange();
 
         assert.equal(saved.length, 1);
-        assert.deepEqual({ ...saved[0].skillUserTargets }, {
-            Claude: "~/.claude/skills",
-        });
+        assert.deepEqual({ ...saved[0].skillUserTargets }, { Claude: "~/.claude/skills" });
         assert.deepEqual({ ...saved[0].skillProjectTargets }, { Claude: ".claude/skills" });
         assert.equal(Object.hasOwn(saved[0], "githubCredentialVariable"), false);
-        assert.deepEqual(notices, ["设置已保存。"]);
+        assert.deepEqual(notices, []);
     } finally {
         fs.rmSync(fixtureDir, { recursive: true, force: true });
     }
