@@ -5,10 +5,25 @@ var crypto = require("crypto");
 const { Notice, Menu } = require("obsidian");
 const { syncDirectory, readText, replaceText, createHistory } = require("./storage");
 const { normalizeNewlines, extractInstructionBody, parseWorkStructure, rebuildDocument, computeLineDiff, composeMergedBody } = require("./documents");
-const { harnessTargets } = require("../settings");
+const { harnessTargets, NotePicker, vaultPath } = require("../settings");
+
+const TYPE_LABELS = { work: "Work", code: "Code" };
+const SOURCE_LABELS = {
+    userSource: "用户指令源笔记",
+    workSource: "Work 项目模板",
+    codeSource: "Code 项目模板",
+};
+const TARGET_STATUS = {
+    unchanged: "已同步",
+    sync: "来源已更新",
+    "record-only": "待建立同步基线",
+    "initial-create": "目标文件不存在",
+    "initial-review": "首次同步有差异",
+};
 
 function mountInstructions(plugin, host) {
     const { app } = plugin;
+    const sourceDrafts = new Map();
     const getLayer1Source = () => plugin.settings.userSource;
     const getLayer1Targets = () => Object.entries(plugin.settings.targets || {}).map(([name, file]) => ({
         name, path: file.startsWith("~/") ? path.join(os.homedir(), file.slice(2)) : file,
@@ -184,7 +199,7 @@ function mountInstructions(plugin, host) {
         if (leaf && leaf.view && leaf.view.editor && typeof leaf.view.editor.getValue === "function") {
             return leaf.view.editor.getValue();
         }
-        if (!vaultPath) throw new Error("请在插件设置中选择源笔记。");
+        if (!vaultPath) throw new Error("请选择来源笔记。");
         var diskPath = path.join(VAULT_ROOT, vaultPath);
         if (!fs.existsSync(diskPath)) {
             throw new Error("找不到文件：" + vaultPath);
@@ -1023,9 +1038,7 @@ function mountInstructions(plugin, host) {
             } : null;
             var afterMerge = onChanged ? function () { return onChanged(); } : null;
 
-            if (target.action === "unchanged") {
-                buttons.push({ label: "已同步", disabled: true });
-            } else if (target.action === "sync") {
+            if (target.action === "sync") {
                 buttons.push({ label: "备份并分发", primary: true, run: distribute, afterSuccess: afterSuccess });
             } else if (target.action === "initial-create") {
                 buttons.push({ label: labels.initialCreateButton, primary: true, run: distribute, afterSuccess: afterSuccess });
@@ -1062,10 +1075,16 @@ function mountInstructions(plugin, host) {
                 };
             }
 
+            var statusText = TARGET_STATUS[target.action];
+            if (target.action === "conflict") {
+                statusText = !fileExists ? "目标文件已删除"
+                    : target.sourceChangedSinceSync ? "两边都有修改" : "目标已修改";
+            }
             appendCard(pane, {
                 title: target.name,
                 pathText: target.displayPath,
                 reason: target.reason,
+                statusText: statusText,
                 buttons: buttons,
                 removeEntry: removeEntry
             });
@@ -1175,14 +1194,13 @@ function mountInstructions(plugin, host) {
     // 类型标签页顶部的登记输入行；登记成功后经 onRegistered 追加该项目卡片，
     // 校验失败在输入行下方红字提示，不动登记表。
     function appendRegisterRow(pane, typeKey, typeName, app, onRegistered) {
-        var row = el("div", "display:flex;gap:8px;margin-bottom:10px;");
+        var row = el("div", "display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;");
         var input = el("input",
-            "flex:1;padding:6px 10px;border:1px solid var(--background-modifier-border);" +
+            "flex:1 1 16em;min-width:0;padding:6px 10px;border:1px solid var(--background-modifier-border);" +
             "border-radius:6px;font-size:13px;");
         input.placeholder = "粘贴项目文件夹或 AGENTS.md 路径";
         var button = el("button", null, "登记为 " + typeName + " 项目");
-        var error = el("div",
-            "color:var(--text-error);font-size:12px;line-height:1.5;margin:-4px 0 10px;");
+        var error = el("div", "color:var(--text-error);font-size:12px;line-height:1.5;");
 
         var run = function () {
             error.textContent = "";
@@ -1211,46 +1229,111 @@ function mountInstructions(plugin, host) {
         pane.appendChild(error);
     }
 
-    function appendSectionHeader(content, title, subtitle, actionEl) {
-        var header = el("div",
-            "margin:6px 0 10px;padding:8px 12px;background:var(--background-secondary);" +
-            "border-radius:6px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;");
-        var meta = el("div", "flex:1;min-width:0;");
-        meta.appendChild(el("div", "font-weight:600;", title));
-        if (subtitle) {
-            meta.appendChild(el("div",
-                "font-weight:400;font-size:11px;color:var(--text-muted);margin-top:3px;" +
-                "font-family:var(--font-monospace);word-break:break-all;", subtitle));
-        }
-        header.appendChild(meta);
-        if (actionEl) header.appendChild(actionEl);
-        content.appendChild(header);
+    function appendSourceRow(pane, key, extraAction) {
+        const label = SOURCE_LABELS[key];
+        const group = el("div", "margin:6px 0 8px;padding:6px 8px;border-radius:6px;background:var(--background-secondary);");
+        const row = el("div", "display:flex;flex-wrap:wrap;align-items:center;gap:6px;");
+        const field = el("label", "display:flex;align-items:center;gap:8px;flex:1 1 16em;min-width:0;");
+        const name = el("span", "flex-shrink:0;font-weight:600;font-size:13px;", label);
+        const input = el("input", "flex:1;min-width:0;font-size:13px;");
+        input.type = "text";
+        input.setAttribute("aria-label", label);
+        input.placeholder = "请选择来源笔记。";
+        input.defaultValue = plugin.settings[key] || "";
+        if (sourceDrafts.has(key)) input.value = sourceDrafts.get(key);
+        const choose = el("button", null, "选择笔记");
+        choose.type = "button";
+        choose.setAttribute("aria-label", "选择" + label);
+        const save = el("button", null, "保存");
+        save.type = "button";
+        const error = el("div", "color:var(--text-error);font-size:12px;");
+        error.setAttribute("role", "alert");
+
+        input.oninput = () => {
+            sourceDrafts.set(key, input.value);
+            input.removeAttribute("aria-invalid");
+            error.textContent = "";
+        };
+        choose.onclick = () => {
+            const picker = new NotePicker(plugin, notePath => {
+                input.value = notePath;
+                input.oninput();
+            });
+            plugin.modals.add(picker);
+            picker.open();
+        };
+        save.onclick = async () => {
+            error.textContent = "";
+            input.removeAttribute("aria-invalid");
+            let next;
+            try {
+                next = vaultPath(input.value === input.defaultValue ? input.value : input.value.trim());
+            } catch (err) {
+                error.textContent = err.message;
+                input.setAttribute("aria-invalid", "true");
+                input.focus();
+                return;
+            }
+            input.disabled = choose.disabled = save.disabled = true;
+            try {
+                await exclusive(() => plugin.updateSettings(current => (
+                    next === current[key] ? null : { ...current, [key]: next }
+                )));
+                sourceDrafts.delete(key);
+                await safeRefresh();
+            } catch (err) {
+                error.textContent = err.message || "设置保存失败。";
+            } finally {
+                input.disabled = choose.disabled = save.disabled = false;
+            }
+        };
+        input.onkeydown = event => {
+            if (event.key === "Enter" && !event.isComposing) save.onclick();
+        };
+
+        field.appendChild(name);
+        field.appendChild(input);
+        row.appendChild(field);
+        row.appendChild(choose);
+        row.appendChild(save);
+        if (extraAction) row.appendChild(extraAction);
+        group.appendChild(row);
+        group.appendChild(error);
+        pane.appendChild(group);
     }
 
-    // card.removeEntry：卡片右上角 × 入口，确认后移出或移除并整卡消失，
-    // 与底部「处理同步状态」的动作按钮在视觉与语义上分开。
+    // 移除入口固定在右上角，同步按钮并排排列在右侧。
     function appendCard(content, card) {
         var row = el("div",
             "border:1px solid var(--background-modifier-border);border-radius:6px;" +
-            "padding:14px;margin-bottom:12px;");
-        var status = el("div", "margin:10px 0;line-height:1.55;white-space:pre-wrap;", card.reason);
-        var buttonRow = el("div", "display:flex;gap:8px;flex-wrap:wrap;");
-
-        // 标题行：左侧标题与路径，右上角可放移除入口。
-        var header = el("div", "display:flex;align-items:flex-start;gap:8px;");
-        var titleBlock = el("div", "flex:1;min-width:0;");
-        titleBlock.appendChild(el("div", "font-weight:600;margin-bottom:5px;", card.title));
-        titleBlock.appendChild(el("div",
+            "position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;" +
+            "padding:6px 10px;margin-bottom:5px;" +
+            (card.removeEntry ? "padding-right:34px;" : ""));
+        var status = el("div",
+            "flex:0 1 auto;max-width:min(100%,17em);color:var(--text-muted);font-size:12px;" +
+            "line-height:1.4;white-space:pre-wrap;overflow-wrap:anywhere;", card.statusText || card.reason);
+        if (card.statusText) status.title = card.reason;
+        var buttonRow = el("div",
+            "display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;margin-left:auto;max-width:100%;" +
+            "--interactive-accent:#1765c5;--interactive-accent-hover:#1458ac;--text-on-accent:#fff;");
+        var titleBlock = el("div", "flex:1 1 9em;min-width:0;line-height:1.4;");
+        titleBlock.appendChild(el("div", "font-weight:600;overflow-wrap:anywhere;", card.title));
+        var pathText = el("div",
             "font-family:var(--font-monospace);font-size:12px;color:var(--text-muted);" +
-            "word-break:break-all;", card.pathText));
-        header.appendChild(titleBlock);
+            "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;", card.pathText);
+        if (card.pathText) {
+            pathText.title = card.pathText;
+            titleBlock.appendChild(pathText);
+        }
+        row.appendChild(titleBlock);
+        row.appendChild(status);
 
         if (card.removeEntry) {
             var remove = card.removeEntry;
             var closeButton = el("button",
                 "background:transparent;border:none;box-shadow:none;cursor:pointer;" +
-                "padding:0 4px;color:var(--text-faint);font-size:18px;line-height:1;" +
-                "flex-shrink:0;", "×");
+                "position:absolute;top:3px;right:3px;height:24px;width:24px;padding:0;" +
+                "color:var(--text-faint);font-size:18px;line-height:1;", "×");
             closeButton.setAttribute("aria-label", remove.ariaLabel || "移除登记");
             closeButton.title = remove.tooltip || "移除登记（项目文件不改动）";
             closeButton.onmouseenter = function () { closeButton.style.color = "var(--text-error)"; };
@@ -1276,15 +1359,15 @@ function mountInstructions(plugin, host) {
                     }
                 });
             };
-            header.appendChild(closeButton);
+            row.appendChild(closeButton);
         }
 
         var runButtons = [];
         (card.buttons || []).forEach(function (entry) {
-            var button = el("button", null, entry.label);
-            if (entry.disabled) {
-                button.disabled = true;
-            } else if (entry.primary) {
+            var button = el("button",
+                "font-size:12px;padding:3px 7px;min-height:26px;height:auto;max-width:100%;white-space:normal;",
+                entry.label);
+            if (entry.primary) {
                 button.className = "mod-cta";
             }
 
@@ -1302,7 +1385,7 @@ function mountInstructions(plugin, host) {
                         button.disabled = result === "applied" || result === "noop";
                     });
                 };
-            } else if (!entry.disabled) {
+            } else {
                 button.onclick = async function () {
                     button.disabled = true;
                     status.textContent = "正在处理……";
@@ -1327,9 +1410,7 @@ function mountInstructions(plugin, host) {
             buttonRow.appendChild(button);
         });
 
-        row.appendChild(header);
-        row.appendChild(status);
-        row.appendChild(buttonRow);
+        if (card.buttons?.length) row.appendChild(buttonRow);
         content.appendChild(row);
     }
 
@@ -1437,8 +1518,6 @@ function mountInstructions(plugin, host) {
     function render(layer1, layer2) {
         var prevScroll = content.scrollTop || 0;
         var nextArea = el("div");
-        var layer1SourcePath = getLayer1Source();
-        var typeSources = getTypeSources();
 
         // ===== 标签栏：第一级与第二级的 Work／Code 各占一个标签页 =====
         // 待处理数 = 需要用户动手的目标数（unchanged 以外的动作）；整级不可用时记 1。
@@ -1453,30 +1532,16 @@ function mountInstructions(plugin, host) {
         }
         paneDefs.push({ key: "layer1", label: "第一级：用户级指令", pending: layer1Pending });
 
-        if (layer2.error) {
-            paneDefs.push({ key: "layer2", label: "第二级：类型指令", pending: 1 });
-        } else {
-            ["work", "code"].forEach(function (typeKey) {
-                var targets = layer2.plan.targets.filter(function (target) {
-                    return target.type === typeKey;
-                });
-                var pending = 0;
-                targets.forEach(function (target) {
-                    if (target.action !== "unchanged") pending += 1;
-                });
-                paneDefs.push({
-                    key: "type-" + typeKey,
-                    label: "第二级：" + (typeKey === "work" ? "Work" : "Code") + " 类型",
-                    pending: pending,
-                    type: typeKey,
-                    targets: targets
-                });
+        Object.entries(TYPE_LABELS).forEach(function ([type, name]) {
+            var targets = layer2.plan?.targets.filter(target => target.type === type) || [];
+            paneDefs.push({
+                key: "type-" + type,
+                label: "第二级：" + name + " 类型",
+                pending: layer2.error ? 1 : targets.filter(target => target.action !== "unchanged").length,
+                type: type,
+                targets: targets
             });
-            // 登记表为空时没有可拆的类型，回落为单个第二级标签页。
-            if (paneDefs.length === 1) {
-                paneDefs.push({ key: "layer2", label: "第二级：类型指令", pending: 0 });
-            }
-        }
+        });
 
         var tabBar = el("div", "display:flex;gap:8px;margin-bottom:12px;");
         var tabs = {};
@@ -1553,11 +1618,10 @@ function mountInstructions(plugin, host) {
                 : { left: 0, bottom: 0 };
             menu.showAtPosition({ x: bounds.left, y: bounds.bottom }, addTargetButton.ownerDocument);
         };
-        appendSectionHeader(panes.layer1, "第一级：用户级指令", "源：" + layer1SourcePath + "　状态：" + LAYER1_STATE_PATH, addTargetButton);
+        appendSourceRow(panes.layer1, "userSource", addTargetButton);
         if (layer1.error) {
             appendCard(panes.layer1, {
                 title: "第一级不可用",
-                pathText: layer1SourcePath,
                 reason: layer1.error
             });
             getLayer1Targets().forEach(function (target) {
@@ -1580,38 +1644,25 @@ function mountInstructions(plugin, host) {
 
         // ===== 第二级区块：按类型分标签页 =====
         paneDefs.slice(1).forEach(function (def) {
-            if (def.key === "layer2") {
-                appendSectionHeader(panes.layer2, "第二级：类型指令（工作规范区块）", "登记表：" + REGISTRY_PATH);
-                if (layer2.error) {
-                    appendCard(panes.layer2, {
-                        title: "第二级不可用",
-                        pathText: REGISTRY_PATH,
-                        reason: layer2.error
-                    });
-                } else {
-                    appendCard(panes.layer2, {
-                        title: "没有登记项目",
-                        pathText: REGISTRY_PATH,
-                        reason: "项目登记表当前为空；在 instruction-projects.json 的 projects 中登记后重新运行。"
-                    });
-                }
+            var pane = panes[def.key];
+            appendSourceRow(pane, def.type + "Source");
+            if (layer2.error) {
+                appendCard(pane, {
+                    title: "第二级不可用",
+                    reason: layer2.error
+                });
                 return;
             }
-            appendSectionHeader(
-                panes[def.key],
-                "第二级：" + (def.type === "work" ? "Work" : "Code") + " 类型（工作规范区块）",
-                "源：" + typeSources[def.type].vaultPath + "　登记表：" + REGISTRY_PATH
-            );
-            appendRegisterRow(panes[def.key], def.type, def.type === "work" ? "Work" : "Code", app, function (target) {
+            appendRegisterRow(pane, def.type, TYPE_LABELS[def.type], app, function (target) {
                 def.targets.push(target);
                 layer2.plan.targets.push(target);
                 if (target.action !== "unchanged") {
                     def.pending += 1;
                     refreshTabLabels();
                 }
-                appendChannelTargets(panes[def.key], [target], def.key, app, wrapRun, wrapUnregister, safeRefresh);
+                appendChannelTargets(pane, [target], def.key, app, wrapRun, wrapUnregister, safeRefresh);
             });
-            appendChannelTargets(panes[def.key], def.targets, def.key, app, wrapRun, wrapUnregister, safeRefresh);
+            appendChannelTargets(pane, def.targets, def.key, app, wrapRun, wrapUnregister, safeRefresh);
         });
 
         // 刷新时尽量停留在原先的标签页；首次打开时停在第一个有待处理的标签页，都没有待处理则显示第一个。

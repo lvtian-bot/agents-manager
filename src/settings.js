@@ -210,11 +210,6 @@ class ManagerSettings extends PluginSettingTab {
             });
         }
 
-        container.createEl("h3", { text: "分发与回收指令" });
-        field(container, "userSource", "用户指令源笔记", "选择要分发给各工具的笔记。", vaultPath);
-        field(container, "workSource", "Work 项目模板", "同步前两个一级标题之间的区块。", vaultPath);
-        field(container, "codeSource", "Code 项目模板", "各项目的目标在同步面板中登记。", vaultPath);
-
         container.createEl("h3", { text: "技能管理" });
         const githubGroup = disclosure(container, "GitHub 更新凭据");
         field(githubGroup, "githubCredentialVariable", "GitHub 凭据环境变量名", "可选，留空时匿名访问 GitHub API（每小时限 60 次）。只填写变量名。", envVariableName);
@@ -272,6 +267,8 @@ module.exports = {
     loadSettings,
     ManagerSettings,
     harnessTargets,
+    NotePicker,
+    vaultPath,
     defaultSkillUserTargets,
     defaultSkillProjectTargets,
     skillUserPath,
