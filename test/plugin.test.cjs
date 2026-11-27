@@ -215,6 +215,7 @@ async function loadPlugin(app, options = {}) {
                 } };
             }
             if (name === "fs" && options.filesystem) return options.filesystem;
+            if (name === "node:https" && options.httpsRequest) return { request: options.httpsRequest };
             if (name === "os") {
                 assert.ok(options.fixtureDir, "同步测试须配置隔离目录");
                 return {
@@ -463,11 +464,26 @@ test("模型预设分别保存密钥，选择后向对应接口发起请求", as
     const options = {
         secrets, notices, save: settings => saved.push(settings),
         async fetch(url, request) {
+            assert.equal(new URL(url).hostname, "api.deepseek.com");
             requests.push({ url, authorization: request.headers.Authorization, payload: JSON.parse(request.body) });
             return { ok: true, json: async () => ({ choices: [{ message: { content: "结果" } }] }) };
         },
+        httpsRequest(url, { method, headers, signal }, onResponse) {
+            assert.equal(method, "POST");
+            assert.equal(signal.aborted, false);
+            const request = new (require("node:events").EventEmitter)();
+            request.end = body => {
+                requests.push({ url, authorization: headers.Authorization, payload: JSON.parse(body) });
+                const response = new (require("node:stream").PassThrough)();
+                response.statusCode = 200;
+                response.headers = { "content-type": "text/event-stream" };
+                onResponse(response);
+                response.end('data: {"choices":[{"delta":{"content":"流式结果"}}]}\n\ndata: [DONE]\n');
+            };
+            return request;
+        },
     };
-    const { plugin, invoke } = await loadPlugin(app, options);
+    const { plugin, invoke, body } = await loadPlugin(app, options);
     const tab = plugin.settingTab;
     const root = tab.containerEl = new Element("div");
     tab.display();
@@ -499,6 +515,7 @@ test("模型预设分别保存密钥，选择后向对应接口发起请求", as
     key.value = "siliconflow-fixture";
     save.onclick();
     await invoke("translate-selection");
+    assert.equal(findElements(body, el => el.tag === "textarea").at(-1).value, "流式结果");
     await choose("deepseek");
     assert.equal(key.placeholder, "••••••••");
     const reopened = await loadPlugin(app, { ...options, settings: JSON.parse(JSON.stringify(saved.at(-1))) });

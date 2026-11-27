@@ -1,5 +1,29 @@
 const { Notice } = require("obsidian");
+const https = require("node:https");
+const { Readable } = require("node:stream");
+const { json } = require("node:stream/consumers");
 const { getModelConnection } = require("./models");
+
+function requestHttps(endpoint, { method, headers, body, signal }) {
+    return new Promise((resolve, reject) => {
+        const request = https.request(endpoint, { method, headers, signal }, response => {
+            const status = response.statusCode;
+            if (status < 200 || status >= 300) {
+                response.destroy();
+                resolve({ ok: false, status });
+                return;
+            }
+            const isJson = response.headers["content-type"]?.includes("application/json");
+            resolve({
+                ok: true,
+                body: isJson ? undefined : Readable.toWeb(response),
+                json: () => json(response),
+            });
+        });
+        request.on("error", reject);
+        request.end(body);
+    });
+}
 
 async function requestText(connection, prompt, signal, onText) {
     const { endpoint, model, credentialVariable, requestOptions } = connection;
@@ -10,8 +34,11 @@ async function requestText(connection, prompt, signal, onText) {
         stream: true, temperature: 0.3, max_tokens: 2000,
         ...requestOptions,
     };
-    if (new URL(endpoint).hostname === "api.siliconflow.cn") payload.enable_thinking = false;
-    const response = await fetch(endpoint, {
+    const isSiliconFlow = new URL(endpoint).hostname === "api.siliconflow.cn";
+    if (isSiliconFlow) payload.enable_thinking = false;
+    // 硅基流动的跨域预检未明确放行 Authorization。桌面端 HTTPS 请求仍可流式读取。
+    const send = isSiliconFlow ? requestHttps : fetch;
+    const response = await send(endpoint, {
         method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + credential },
         body: JSON.stringify(payload), signal,
     });
