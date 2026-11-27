@@ -64,8 +64,7 @@ function mountSkills(plugin, host) {
 
     content.appendChild(el("div",
         "margin-bottom:14px;line-height:1.6;color:var(--text-muted);",
-        "扫描用户级 ~/.agents/skills、当前 Obsidian 仓库及已登记项目的 .agents/skills（无技能的目录不显示）。" +
-        "自建技能可直接编辑 SKILL.md；GitHub 复制技能点「更新」直接拉取最新文件。"));
+        "技能来自用户主目录、当前 Obsidian 库和已登记项目下的 .agents/skills。每个技能放在单独的子目录中，目录内须有 SKILL.md。"));
 
     function createModal(options) {
         const dialog = plugin.openDialog(options.title, options.onClose);
@@ -661,6 +660,36 @@ function mountSkills(plugin, host) {
         parent.appendChild(card);
     }
 
+    function renderLinkSwitch(parent, scope, skill, harness, linked) {
+        const toggle = el("button", "padding:0;border:0;");
+        toggle.type = "button";
+        toggle.setAttribute("role", "switch");
+        toggle.setAttribute("aria-label", skill.name + " 链接到 " + harness.name);
+        function setLinked(value) {
+            linked = value;
+            toggle.className = value ? "checkbox-container is-enabled" : "checkbox-container";
+            toggle.style.backgroundColor = value ? "var(--interactive-accent)" : "var(--background-modifier-border-hover)";
+            toggle.setAttribute("aria-checked", String(value));
+        }
+        setLinked(linked);
+        toggle.onclick = async () => {
+            const enable = !linked;
+            toggle.disabled = true;
+            try {
+                await exclusive(() => enable
+                    ? distributeSingleSkill(history, scope, skill, harness)
+                    : unlinkSingleSkill(history, skill, harness));
+                setLinked(enable);
+                new Notice(enable ? "已分发 " + skill.name + " → " + harness.name : "已取消链接：" + skill.name);
+            } catch (error) {
+                await showMessage(enable ? "分发失败" : "取消链接失败", error.message || String(error));
+            }
+            await safeRefresh();
+            toggle.disabled = false;
+        };
+        parent.appendChild(toggle);
+    }
+
     function renderSkillRow(parent, scope, skill) {
         const row = el("tr");
         const info = el("th", SKILL_CELL_STYLE + "text-align:left;font-weight:400;min-width:140px;");
@@ -695,14 +724,14 @@ function mountSkills(plugin, host) {
         row.appendChild(typeCell);
 
         const actionCell = el("td", SKILL_CELL_STYLE);
-        const actions = el("div", "display:flex;gap:4px;flex-wrap:wrap;min-width:135px;");
+        const actions = el("div", "display:flex;gap:4px;flex-wrap:wrap;");
         actionCell.appendChild(actions);
         row.appendChild(actionCell);
 
         if (scope.harnessStates.length) {
             for (const hState of scope.harnessStates) {
                 const cell = el("td", SKILL_CELL_STYLE);
-                const line = el("div", "display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:82px;");
+                const line = el("div", "display:flex;align-items:center;gap:4px;flex-wrap:wrap;");
                 cell.appendChild(line);
                 if (hState.status === "whole-dir-linked") {
                     const status = el("span", "color:var(--text-muted);", "整目录已链接");
@@ -714,36 +743,8 @@ function mountSkills(plugin, host) {
                     line.appendChild(status);
                 } else {
                     const sState = hState.skills[skill.name];
-                    if (sState.status === "linked") {
-                        line.appendChild(el("span", "color:var(--text-muted);", "已链接"));
-                        const unlinkBtn = el("button", SKILL_ACTION_STYLE, "取消链接");
-                        unlinkBtn.onclick = async () => {
-                            unlinkBtn.disabled = true;
-                            try {
-                                await exclusive(() => unlinkSingleSkill(history, skill, hState));
-                                new Notice("已取消链接：" + skill.name);
-                                await safeRefresh();
-                            } catch (error) {
-                                unlinkBtn.disabled = false;
-                                await showMessage("取消链接失败", error.message || String(error));
-                            }
-                        };
-                        line.appendChild(unlinkBtn);
-                    } else if (sState.status === "unlinked") {
-                        line.appendChild(el("span", "color:var(--text-muted);", "未链接"));
-                        const linkBtn = el("button", SKILL_ACTION_STYLE, "分发");
-                        linkBtn.onclick = async () => {
-                            linkBtn.disabled = true;
-                            try {
-                                await exclusive(() => distributeSingleSkill(history, scope, skill, hState));
-                                new Notice("已分发 " + skill.name + " → " + hState.name);
-                                await safeRefresh();
-                            } catch (error) {
-                                linkBtn.disabled = false;
-                                await showMessage("分发失败", error.message || String(error));
-                            }
-                        };
-                        line.appendChild(linkBtn);
+                    if (sState.status === "linked" || sState.status === "unlinked") {
+                        renderLinkSwitch(line, scope, skill, hState, sState.status === "linked");
                     } else if (sState.status === "broken") {
                         const status = el("span", "color:var(--text-warning);", "失效");
                         status.title = sState.reason;
@@ -769,12 +770,12 @@ function mountSkills(plugin, host) {
             }
         }
 
-        const viewBtn = el("button", SKILL_ACTION_STYLE, "查看 SKILL.md");
+        const viewBtn = el("button", SKILL_ACTION_STYLE, "查看");
         viewBtn.onclick = () => openViewSkillModal(skill);
         actions.appendChild(viewBtn);
 
         if (skill.source.kind === "self") {
-            const editBtn = el("button", SKILL_ACTION_STYLE, "编辑 SKILL.md");
+            const editBtn = el("button", SKILL_ACTION_STYLE, "编辑");
             editBtn.onclick = () => openEditSkillModal(skill);
             actions.appendChild(editBtn);
         } else {

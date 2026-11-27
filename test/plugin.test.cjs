@@ -1457,7 +1457,7 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     assert.ok(skillsTextIncludes("包含 agents/openai.yaml").length > 0);
 
     // 3. 自建技能编辑与撤销
-    sButton("编辑 SKILL.md").onclick();
+    sButton("编辑").onclick();
     const editor = findElements(plugin.body, node => node.tag === "textarea")[0];
     assert.match(editor.value, /初始正文/);
     editor.value = "---\nname: alpha-skill\ndescription: 修改后的 Alpha 说明。\n---\n\n# Alpha\n新版正文\n";
@@ -1475,13 +1475,35 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
     await sButton("清理").onclick();
     assert.equal(fs.lstatSync(path.join(customToolUserSkills, "old-removed"), { throwIfNoEntry: false }), undefined);
 
-    await sButton("分发").onclick();
+    const linkSwitch = (name, tool) => findElements(skillsHost, node =>
+        node.getAttribute("role") === "switch" && node.getAttribute("aria-label") === name + " 链接到 " + tool)[0];
+    const alphaSwitch = () => linkSwitch("alpha-skill", "CustomTool");
     const alphaLink = path.join(customToolUserSkills, "alpha-skill");
+    assert.equal(linkSwitch("alpha-skill", "Claude"), undefined);
+    assert.equal(linkSwitch("conflict-skill", "CustomTool"), undefined);
+    assert.equal(alphaSwitch().getAttribute("aria-checked"), "false");
+    await alphaSwitch().onclick();
     assert.ok(fs.lstatSync(alphaLink).isSymbolicLink());
+    assert.equal(alphaSwitch().getAttribute("aria-checked"), "true");
 
-    await sButton("取消链接").onclick();
+    await alphaSwitch().onclick();
     assert.equal(fs.lstatSync(alphaLink, { throwIfNoEntry: false }), undefined);
     assert.equal(fs.existsSync(alphaSkillMd), true);
+    assert.equal(alphaSwitch().getAttribute("aria-checked"), "false");
+
+    // 列表打开后目标被占用，打开开关应失败，刷新后该行显示冲突。
+    write(alphaLink, "外部文件");
+    const staleSwitch = alphaSwitch();
+    const failedLink = staleSwitch.onclick();
+    await tick();
+    assert.equal(staleSwitch.disabled, true);
+    assert.equal(staleSwitch.getAttribute("aria-checked"), "false");
+    assert.ok(textIncludes("分发失败").length > 0);
+    sButton("关闭").onclick();
+    await failedLink;
+    assert.equal(read(alphaLink), "外部文件");
+    assert.equal(alphaSwitch(), undefined);
+    fs.unlinkSync(alphaLink);
 
     await sButton("一键分发").onclick();
     assert.ok(fs.lstatSync(alphaLink).isSymbolicLink());
@@ -1540,14 +1562,14 @@ test("技能管理支持工作区切换、检查、自建编辑、逐个分发�
         "https://github.com/openclaw/gogcli/tree/1111111111111111111111111111111111111111/.agents/skills/gog @ 1111111111111111111111111111111111111111";
     await sButton("保存").onclick();
     assert.equal(typeFor("gog").value, "github");
-    assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "编辑 SKILL.md").length, 4);
-    assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "查看 SKILL.md").length, 5);
+    assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "编辑").length, 4);
+    assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "查看").length, 5);
     assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "修改链接").length, 1);
     assert.equal(findElements(skillsHost, node => node.tag === "button" && node.textContent === "设置来源").length, 0);
     const gogRow = typeFor("gog").parent.parent;
     assert.equal(gogRow.children.length, 5);
     assert.equal(findElements(gogRow.children[2], node => node.textContent === "更新").length, 1);
-    assert.equal(findElements(gogRow.children[4], node => node.textContent === "分发").length, 1);
+    assert.equal(linkSwitch("gog", "CustomTool").closest("td"), gogRow.children[4]);
 
     await sButton("检查更新").onclick();
     assert.ok(skillsTextIncludes("发现新版本：2222222").length > 0);
@@ -1678,7 +1700,7 @@ test("PR 审查回归：并发编辑不回滚外部改动、GitHub 更新保留�
     await plugin.invoke("manage-skills");
 
     // 1. 并发编辑：前置检查失败绝不能用旧内容覆盖外部修改，也不残留 pending 记录
-    sButton("编辑 SKILL.md").onclick();
+    sButton("编辑").onclick();
     const editor = findElements(plugin.body, node => node.tag === "textarea")[0];
     editor.value = "---\nname: self-skill\ndescription: 弹窗修改\n---\n弹窗内容\n";
     write(selfMd, "---\nname: self-skill\ndescription: 外部最新\n---\n外部最新正文\n");
@@ -1795,7 +1817,8 @@ test("PR 第二轮审查回归：链接改向撤销提示、源设置变更拦�
     // 2. 分发技能后外部把链接改为指向另一技能，撤销须弹确认；取消则保留新链接
     await plugin.invoke("manage-skills");
     const skillsHost = plugin.body.children[0].children[0].children[1].children[1];
-    await buttonIn(skillsHost, "分发").onclick();
+    const skillSwitch = findElements(skillsHost, node => node.getAttribute("aria-label") === "skill-one 链接到 Claude")[0];
+    await skillSwitch.onclick();
     const linkPath = path.join(claudeUserSkills, "skill-one");
     fs.unlinkSync(linkPath);
     fs.symlinkSync(altSkillDir, linkPath, process.platform === "win32" ? "junction" : "dir");
@@ -2268,7 +2291,7 @@ test("技能管理自动纳入当前 Obsidian 仓库技能，支持去重、分�
 
     // 2. 当前仓库自建编辑、GitHub 更新与按项目级目标一键分发 + 撤销
     sButton("知识库名称（2）").onclick();
-    sButton("编辑 SKILL.md", 1).onclick();
+    sButton("编辑", 1).onclick();
     const editor = findElements(plugin.body, node => node.tag === "textarea")[0];
     editor.value = "---\nname: vault-skill\ndescription: 仓库技能新说明\n---\n\n# Vault\n新内容\n";
     editor.oninput();

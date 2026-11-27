@@ -1468,8 +1468,7 @@ function mountInstructions(plugin, host) {
 
     content.appendChild(el("div",
         "margin-bottom:14px;line-height:1.6;color:var(--text-muted);",
-        "可逐个处理，也可一键分发全部目标。第一级分发整份正文；" +
-        "第二级只同步第 1 个「# 」一级标题到第 2 个之间的区块，第 2 个一级标题及其后内容永不改动。"));
+        "用户级指令同步整篇正文。Work 和 Code 项目只同步第一个一级标题及其内容，到第二个一级标题前为止。"));
 
     var TAB_BASE_STYLE =
         "flex:1;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;box-shadow:none;" +
